@@ -19,13 +19,9 @@ npx playwright install chromium
 
 安装会包含 `doubao-cli@0.13.0` 与 HEANG。`setup:upstream` 在 `vendor/doubao-free-api` 安装依赖并构建；无 Docker。
 
-生成一个本地访问密钥：
+无需手工配置 API Key。启动时网关自动生成随机密钥并保存到本机 `.env`（已有自定义密钥会保留，示例值会自动替换）。页面自动连接，配置好豆包客户端即可创作。外部程序调用 API 时，可在「连接设置」点击「复制 API Key」。
 
-```bash
-node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"
-```
-
-将结果填入本机 `.env` 的 `LOCAL_API_KEY`，不要保留示例值。其他基础配置：
+其他基础配置：
 
 ```dotenv
 PORT=8787
@@ -60,12 +56,12 @@ npm start
 
 ## 5. 在页面生成视频
 
-1. 「连接设置」展开「API Key 从哪里获取？」。这是自己设置的网关密码，不是豆包提供的 Key。运行 `npm run api:key -- --copy`（macOS）复制已有密钥，粘贴后点击「验证并连接」。错误密钥会显示验证失败。默认仅在当前页面使用；勾选「记住这台设备」才持久保存。
+1. 打开本机页面即自动连接，无需输入密钥。「连接设置」显示连接状态和只读密钥，并提供「复制 API Key」及「重新连接」按钮。
 2. 「视频创作」填写场景、动作、镜头、氛围。
 3. 视频时长填写 1–15 的整数秒；画面比例选横屏、竖屏或方形。格式统一为 MP4。
 4. 点击生成。默认请求 Seedance 2.0 Fast，实际模型 ID 未独立核验。
 5. 等待真实任务状态更新；完成后预览。完整显示竖屏与方形画幅。
-6. 刷新后继续原任务；未记住密钥时重新连接即可恢复。作品库保存本机真实任务记录。
+6. 刷新后继续原任务；页面自动重新连接并恢复原任务。作品库保存本机真实任务记录。
 
 只自动回答有限白名单中的视频参数确认。其他输入需要去客户端处理，再在页面「查看任务信息」中重新查询。没有视频文件、任务失败或等待输入都不会显示为成片。
 
@@ -149,11 +145,14 @@ node --test tests/enterprise-video-confirmation.mjs tests/enterprise-video-extra
 `LOCAL_API_KEY` 是你自己为本机网关设置的访问密码，并非豆包账号密钥、Cookie、GitHub Key 或官方云端 API Key。豆包生成权限来自已登录客户端账户；两个环节缺一不可。
 
 - 已部署用户：本机 `.env` 已有 `LOCAL_API_KEY`，可以继续使用；`npm run api:key -- --copy` 只复制到 macOS 剪贴板，不在终端显示。
-- 新部署用户：按照第 2 节生成随机值，写入 `.env` 的 `LOCAL_API_KEY`，重启网关。
-- 网页：在连接设置粘贴此 Key 并验证。
+- 新部署用户：启动网关时自动生成并保存随机密钥，无需填写。
+- 网页：打开本机页面即自动连接；连接设置可复制 Key 供外部程序调用。
 - HTTP 调用：请求头为 `Authorization: Bearer <LOCAL_API_KEY>`。
 - 项目 CLI：自动读取本机 `.env`，无需手工传 Key。
 
 连接设置中的「API 调用示例」提供可复制的 cURL 和 Python 示例，包括提交、查询、下载。示例使用环境变量，不嵌入真实密钥。macOS zsh 可用 `read -rs API_KEY; export API_KEY` 输入密钥（输入时不可见），Python 示例需 `pip install requests`。
 
 网关默认只在本机 `http://127.0.0.1:8787` 可用。其他电脑的 127.0.0.1 指向它们自己；部署到其他电脑后应调用那台电脑的网关。当前教程没有配置公网服务。仓库网站地址也不是视频 API 地址。
+
+
+本机自动连接入口仅接受回环地址、正确 localhost/127.0.0.1 主机名及同源 JSON POST 请求，拒绝外部来源与 DNS 重绑定请求；响应禁止缓存。密钥只在当前页面内存中使用，不再保存到 localStorage。视频 HTTP API 继续要求 Bearer Key。

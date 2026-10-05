@@ -17,11 +17,11 @@ cp .env.example .env
 npm install --registry=https://registry.npmmirror.com
 npm run setup:upstream
 npx playwright install chromium
-# 将 .env 中的 LOCAL_API_KEY 改为随机密钥
+# 启动时自动生成并保存网关密钥
 npm start
 ```
 
-打开 **http://127.0.0.1:8787/**，在「连接设置」填入自己的 `LOCAL_API_KEY`。企业客户端视频还需要已登录的 **Doubao.app** 及本机 CDP；准备方法见部署教程。
+打开 **http://127.0.0.1:8787/** 即自动连接，无需填写密钥。企业客户端视频需要已登录的 **Doubao.app** 及本机 CDP；准备方法见部署教程。
 
 ## 当前功能
 
@@ -36,7 +36,7 @@ npm start
 
 ## 获取本地 API Key
 
-Key 是你自己设置的网关密码，保存在本机 `.env` 的 `LOCAL_API_KEY`，无需向豆包申请。macOS 已部署用户可运行 `npm run api:key -- --copy` 复制，粘贴到「连接设置」后验证连接。页面提供可复制的 cURL / Python API 示例。
+Key 是网关自动生成的本机访问密码，保存在 `.env` 的 `LOCAL_API_KEY`，无需向豆包申请或手工填写。网页自动连接；外部程序调用 API 时，在「连接设置」点击「复制 API Key」。页面保留 cURL / Python API 示例。
 
 ## CLI 示例
 

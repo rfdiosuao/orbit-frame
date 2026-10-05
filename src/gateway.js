@@ -398,6 +398,22 @@ export function createApp() {
 
   app.use(express.static(path.join(config.root, "public")));
 
+  // Bootstrap the local page only; reject external origins and DNS rebinding.
+  app.post('/api/local-access', (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    const port = req.socket.localPort;
+    const host = req.get('host');
+    const localHosts = new Set([`127.0.0.1:${port}`, `localhost:${port}`]);
+    const peer = req.socket.remoteAddress;
+    const localPeer = peer === '127.0.0.1' || peer === '::1' || peer === '::ffff:127.0.0.1';
+    const fetchSite = req.get('sec-fetch-site');
+    if (!localPeer || !localHosts.has(host) || req.get('origin') !== `http://${host}` ||
+        !req.is('application/json') || fetchSite && fetchSite !== 'same-origin') {
+      return res.status(403).json({ error: { type: 'local_page_only', message: '仅本机网关页面可自动连接。' } });
+    }
+    return res.json({ api_key: config.localApiKey });
+  });
+
   app.get("/health", (_req, res) => {
     res.json({ ok: true, service: "doubao-relay" });
   });
