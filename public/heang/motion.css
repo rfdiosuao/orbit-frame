@@ -1,0 +1,90 @@
+/*
+ * 宇航.design passive pointer interactions (pointer.ts adds .heang-fx to <html> on fine-pointer devices).
+ * Everything here keys off .heang-fx, so pages without the script, touch screens and reduced-motion users get
+ * the plain design.
+ */
+
+/* magnetic buttons and tilting cards ease back when the pointer leaves */
+.heang-fx :is(.h-btn, [data-magnetic]) {
+  transition: transform var(--h-dur-m1), box-shadow var(--h-dur-m1), translate 0.26s var(--h-ease-out), background-color var(--h-dur-m1), color var(--h-dur-m1);
+}
+.heang-fx :is(.lift, [data-tilt]) {
+  transition: transform var(--h-dur-m1), box-shadow var(--h-dur-m1), rotate 0.32s var(--h-ease-out);
+}
+/* tilt needs depth from the parent */
+.heang-fx :has(> :is(.lift, [data-tilt])) {
+  perspective: 1100px;
+}
+
+/* spotlight: a soft sun light under the pointer, default (cadet) world only so other worlds keep their own card art */
+.heang-fx:is(:not([data-dim]), [data-dim="cadet"]) .stk {
+  background-image: radial-gradient(
+    280px circle at var(--hfx-x, -999px) var(--hfx-y, -999px),
+    color-mix(in srgb, var(--h-accent) 16%, transparent),
+    transparent 70%
+  );
+}
+
+/* orbit cursor: the native cursor stays; this ring trails it */
+.hfx-ring {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 2147482000;
+  width: 30px;
+  height: 30px;
+  margin: -15px 0 0 -15px;
+  border: 2px solid var(--h-edge);
+  border-radius: 50%;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.2s, width 0.22s var(--h-ease-out), height 0.22s var(--h-ease-out), margin 0.22s var(--h-ease-out),
+    background-color 0.22s, border-color 0.22s;
+}
+.hfx-ring::after {
+  content: "";
+  position: absolute;
+  top: -4px;
+  left: 50%;
+  width: 6px;
+  height: 6px;
+  margin-left: -3px;
+  border-radius: 50%;
+  background: var(--h-accent);
+  box-shadow: 0 0 0 1.5px var(--h-edge);
+}
+.hfx-ring.is-on { opacity: 0.85; }
+.hfx-ring.is-hot {
+  width: 46px;
+  height: 46px;
+  margin: -23px 0 0 -23px;
+  background-color: color-mix(in srgb, var(--h-accent) 22%, transparent);
+}
+.hfx-ring.is-down {
+  width: 22px;
+  height: 22px;
+  margin: -11px 0 0 -11px;
+}
+
+/* click burst: one orbit ring expanding from the press point */
+.hfx-burst {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 2147481999;
+  width: 64px;
+  height: 64px;
+  margin: -32px 0 0 -32px;
+  border: 2px solid var(--h-accent);
+  border-radius: 50%;
+  pointer-events: none;
+  animation: hfx-burst 0.6s var(--h-ease-out) forwards;
+}
+@keyframes hfx-burst {
+  from { transform: scale(0.2) rotate(-18deg) scaleY(0.6); opacity: 0.9; }
+  to { transform: scale(1.6) rotate(-18deg) scaleY(0.6); opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hfx-ring, .hfx-burst { display: none; }
+}

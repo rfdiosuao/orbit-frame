@@ -1,0 +1,99 @@
+/*
+ * HEANG design tokens v1.3
+ * Framework-free: any site can <link> this file and use the variables.
+ *
+ * Two switches, settable on <html> or on any element (tokens are scoped, so a subtree
+ * can live in another dimension):
+ *   data-dim  = a world id; each world ships its own tokens in src/worlds/<id>/world.css
+ *   data-mode = "sky" | "space"   (only 太空少年 has two modes; the cinematic worlds are single-look)
+ * With no data-dim at all the page gets 太空少年 and follows the OS light/dark preference.
+ */
+
+/* ─────────── shared, dimension-independent ─────────── */
+:root {
+  --h-brand-blue: #2f4b73;
+  --h-fog: #9ab8e7;
+  --h-sun: #ffd23f;
+  --h-pink: #ff93b4;
+
+  /* planet colors: one per site */
+  --h-ha00: #ffd23f; /* 主页 */
+  --h-ha01: #ff93b4; /* MODE II */
+  --h-ha02: #3fd9a6; /* LOOM */
+  --h-ha03: #5fd3f3; /* Lumi */
+  --h-ha04: #9c8cff; /* 星匣 */
+  --h-ha05: #ffa53d; /* 服呢 */
+  --h-ha06: #b9ed08; /* 唤名 */
+  --h-ha07: #ff7a5c; /* 拾光 */
+  --h-ha08: #2f4b73; /* AI 导航 */
+  --h-ha09: #2f4b73; /* 文档 */
+
+  --h-ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --h-dur-m1: 140ms;
+  --h-dur-m2: 480ms;
+  --h-dur-m3: 900ms;
+}
+
+/* ─────────── 01 太空少年 CADET · sky ─────────── */
+:root:not([data-dim]),
+[data-dim="cadet"] {
+  --h-bg: #cfe3ff;
+  --h-bg-dot: rgba(15, 32, 68, 0.13);
+  --h-card: #ffffff;
+  --h-ink: #0f2044;
+  --h-muted: #4a5a7c;
+  --h-line: rgba(15, 32, 68, 0.16);
+  --h-edge: #0f2044;
+  --h-shadow: #0f2044;
+  --h-term: #0f2044;
+  --h-term-fg: #dde8ff;
+  --h-glow: transparent;
+  --h-brand: #2f4b73;
+  --h-accent: #ffd23f;
+  --h-on-accent: #0f2044;
+  --h-primary: #ff93b4;
+  --h-on-primary: #0f2044;
+
+  --h-font-display: "Unbounded", "Noto Sans SC", system-ui, sans-serif;
+  --h-font-head: "Noto Sans SC", "PingFang SC", system-ui, sans-serif;
+  --h-font-sans: "Noto Sans SC", "PingFang SC", system-ui, sans-serif;
+  --h-font-mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
+  --h-head-weight: 900;
+
+  --h-bw: 2px;
+  --h-bw-thin: 1.5px;
+  --h-radius: 18px;
+  --h-radius-sm: 10px;
+  --h-radius-xs: 6px;
+  --h-r-pill: 999px;
+  --h-sh-xs: 2px 2px 0 var(--h-shadow);
+  --h-sh-sm: 3px 3px 0 var(--h-shadow);
+  --h-sh: 4px 4px 0 var(--h-shadow);
+  --h-sh-lg: 6px 6px 0 var(--h-shadow);
+  --h-sh-press: 1px 1px 0 var(--h-shadow);
+  --h-3d-edge: #0f2044;
+  color-scheme: light;
+}
+
+/* ─────────── 01 太空少年 CADET · space ─────────── */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-dim]):not([data-mode="sky"]),
+  [data-dim="cadet"]:not([data-mode="sky"]) {
+    --h-bg: #0a1233; --h-bg-dot: rgba(190, 210, 255, 0.09); --h-card: #141f4a; --h-ink: #eaf1ff; --h-muted: #9dadd6;
+    --h-line: rgba(220, 230, 255, 0.14); --h-edge: #dce6ff; --h-shadow: #02061a; --h-term: #050a20;
+    --h-glow: rgba(255, 210, 63, 0.35); --h-brand: #9ab8e7; --h-3d-edge: #dce6ff; color-scheme: dark;
+  }
+}
+:root:not([data-dim])[data-mode="space"],
+[data-dim="cadet"][data-mode="space"] {
+  --h-bg: #0a1233; --h-bg-dot: rgba(190, 210, 255, 0.09); --h-card: #141f4a; --h-ink: #eaf1ff; --h-muted: #9dadd6;
+  --h-line: rgba(220, 230, 255, 0.14); --h-edge: #dce6ff; --h-shadow: #02061a; --h-term: #050a20;
+  --h-glow: rgba(255, 210, 63, 0.35); --h-brand: #9ab8e7; --h-3d-edge: #dce6ff; color-scheme: dark;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --h-dur-m2: 1ms;
+    --h-dur-m3: 1ms;
+  }
+}

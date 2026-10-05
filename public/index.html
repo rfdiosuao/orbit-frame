@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-CN" data-mode="sky">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#cfe3ff">
+  <title>轨映 · 视频创作</title>
+  <link rel="icon" type="image/svg+xml" href="/orbit-frame.svg">
+  <link rel="stylesheet" href="/heang/tokens.css">
+  <link rel="stylesheet" href="/heang/motion.css">
+  <link rel="stylesheet" href="/style.css">
+  <script>try{document.documentElement.dataset.mode=localStorage.getItem('orbit_frame_theme')==='space'?'space':'sky'}catch{}</script>
+</head>
+<body>
+  <style>
+    #heang-splash{position:fixed;inset:0;z-index:2147483000;display:grid;place-items:center;background:#cfe3ff;background-image:radial-gradient(rgba(15,32,68,.1) 1px,transparent 1.2px);background-size:22px 22px;transition:opacity .42s ease;animation:hs-failsafe .4s ease 9s forwards}
+    :root[data-mode="space"] #heang-splash{background-color:#0a1233;background-image:radial-gradient(rgba(190,210,255,.09) 1px,transparent 1.2px)}
+    #heang-splash.hs-reveal{opacity:0;pointer-events:none}
+    #heang-splash .hs-mark{position:relative;width:88px;height:88px;transition:transform .64s cubic-bezier(.65,0,.25,1)}
+    #heang-splash .hs-mark>img{display:block;width:100%;height:100%;border-radius:26%;box-shadow:0 0 0 5px #0f2044}
+    #heang-splash .hs-mark::before,#heang-splash .hs-ring{content:"";position:absolute;inset:-18px;border-radius:50%;transition:opacity .18s ease}
+    #heang-splash .hs-mark::before{border:4px solid rgba(15,32,68,.1)}
+    #heang-splash .hs-ring{background:conic-gradient(from 0deg,transparent 0 18%,rgba(255,255,255,.55) 50%,#fff 100%);-webkit-mask:radial-gradient(farthest-side,transparent calc(100% - 4px),#000 calc(100% - 3.5px));mask:radial-gradient(farthest-side,transparent calc(100% - 4px),#000 calc(100% - 3.5px));filter:drop-shadow(0 0 1.5px rgba(15,32,68,.55));animation:hs-spin .9s linear infinite}
+    #heang-splash.hs-done .hs-ring,#heang-splash.hs-done .hs-mark::before{opacity:0}
+    @keyframes hs-spin{to{transform:rotate(1turn)}}@keyframes hs-failsafe{to{opacity:0;visibility:hidden;pointer-events:none}}
+    @media(prefers-reduced-motion:reduce){#heang-splash .hs-ring{animation:none}#heang-splash .hs-mark{transition:none}}
+  </style>
+  <noscript><style>#heang-splash{display:none}</style></noscript>
+  <div id="heang-splash" aria-hidden="true"><div class="hs-mark"><span class="hs-ring"></span><img src="/orbit-frame.svg" alt=""></div></div>
+  <div class="shell">
+    <header class="topbar">
+      <a class="brand" href="#create" aria-label="轨映首页"><img data-heang-logo src="/orbit-frame.svg" alt=""><span><strong>轨映</strong><small>ORBIT FRAME</small></span></a>
+      <nav class="nav" aria-label="主导航"><button class="nav-link active" data-view="create" type="button">视频创作</button><button class="nav-link" data-view="library" type="button">作品库</button><button class="nav-link" data-view="image" type="button">图像</button><button class="nav-link" data-view="settings" type="button">连接设置</button></nav>
+      <div class="top-actions"><span class="service" id="serviceStatus"><i></i> 检查本地服务</span><button id="themeToggle" class="theme-toggle h-btn" type="button" aria-label="切换深空主题">☾ <span>深空</span></button></div>
+    </header>
+    <main>
+      <section id="view-create" class="view active" aria-labelledby="heroTitle">
+        <div class="hero"><div><p class="eyebrow"><span class="star">✦</span> 从一个念头，驶入画面</p><h1 id="heroTitle">让想象，<em>动起来。</em></h1><p>写下你的镜头，选择时长与画面比例。轨映会把灵感变成一段可保存的视频。</p></div><div class="hero-orbit" aria-hidden="true"><span>FRAME / 01</span><b>↗</b></div></div>
+        <div class="workspace">
+          <form id="createForm" class="card composer stk">
+            <div class="section-title"><span class="step">01</span><div><h2>描述你的画面</h2><p>可以写场景、动作、镜头和氛围</p></div></div>
+            <label class="field-label" for="videoPrompt">提示词</label>
+            <textarea id="videoPrompt" required maxlength="20000" rows="7" placeholder="例如：一艘纸船驶过雨后的城市，镜头低角度跟随水面，暖色路灯倒映，电影质感……"></textarea>
+            <div class="prompt-footer"><span id="promptCount">0 字</span><span>灵感试试</span></div>
+            <div class="suggestions" aria-label="提示词灵感"><button type="button" class="suggestion" data-prompt="一艘小小的纸船在雨后的城市水洼里航行。镜头贴近水面缓缓跟随，暖黄色路灯和霓虹倒映，电影质感，细腻光影。">雨夜纸船 ↗</button><button type="button" class="suggestion" data-prompt="清晨的海边，一只金色小狐狸在柔软沙滩上奔跑，浪花轻轻追逐它的脚步。低机位跟拍，温暖日光，梦幻动画风格。">海边追光 ↗</button><button type="button" class="suggestion" data-prompt="一杯咖啡放在靠窗的木桌上，蒸汽缓缓升起，窗外樱花随风飘落。固定镜头，柔和自然光，安静治愈的短片。">窗边一刻 ↗</button></div>
+            <div class="divider"></div>
+            <div class="section-title compact"><span class="step">02</span><div><h2>设置镜头</h2><p>时长为视频秒数</p></div></div>
+            <div class="duration-row"><label for="videoDuration">视频时长</label><div class="duration-control"><button type="button" id="durationMinus" aria-label="减少一秒">−</button><input id="videoDuration" type="number" min="1" max="15" step="1" value="5" inputmode="numeric"><span>秒</span><button type="button" id="durationPlus" aria-label="增加一秒">＋</button></div></div>
+            <fieldset class="ratios"><legend>画面比例</legend><div class="ratio-list"><label class="ratio-option"><input type="radio" name="ratio" value="16:9" checked><span class="ratio-card"><i class="ratio-icon wide"></i><strong>横屏</strong><small>16:9</small></span></label><label class="ratio-option"><input type="radio" name="ratio" value="9:16"><span class="ratio-card"><i class="ratio-icon tall"></i><strong>竖屏</strong><small>9:16</small></span></label><label class="ratio-option"><input type="radio" name="ratio" value="1:1"><span class="ratio-card"><i class="ratio-icon square"></i><strong>方形</strong><small>1:1</small></span></label></div><details class="more-ratios"><summary>更多比例</summary><div class="ratio-list extras"><label class="ratio-option"><input type="radio" name="ratio" value="4:3"><span class="ratio-card"><i class="ratio-icon classic"></i><strong>经典横屏</strong><small>4:3</small></span></label><label class="ratio-option"><input type="radio" name="ratio" value="3:4"><span class="ratio-card"><i class="ratio-icon portrait"></i><strong>经典竖屏</strong><small>3:4</small></span></label></div></details></fieldset>
+            <div class="form-foot"><span>✦ Seedance 2.0 Fast <span class="dot-sep">·</span> MP4</span><button id="generateButton" class="primary-button h-btn" type="submit">生成视频 <span aria-hidden="true">↗</span></button></div>
+            <p id="formNotice" class="form-notice" role="status"></p>
+          </form>
+          <div class="result-column">
+            <section class="card preview-card" aria-labelledby="previewTitle"><div class="preview-heading"><div><p class="overline">THE VIEWFINDER</p><h2 id="previewTitle">预览画面</h2></div><span id="previewBadge" class="badge">等待创作</span></div><div id="previewStage" class="preview-stage"><div id="previewEmpty" class="preview-empty"><div class="empty-art" aria-hidden="true"><img src="/orbit-frame.svg" alt=""><span class="spark one">✦</span><span class="spark two">✧</span></div><strong>你的下一帧，从这里开始</strong><p>写下一个好故事，让画面跟上想象。</p></div><div id="previewLoading" class="preview-loading" hidden><div class="loading-art"><img src="/orbit-frame.svg" alt=""><span></span></div><strong id="loadingTitle">画面正在路上</strong><p id="loadingDescription">已提交，正在等待生成结果。</p><small id="elapsedTime">已等待 0 秒</small></div><video id="videoPlayer" controls playsinline preload="metadata" hidden></video></div><div class="preview-meta"><div><strong id="previewName">尚无视频</strong><p id="previewDetail">作品完成后，可以在这里预览与下载。</p></div><button id="downloadButton" class="secondary-button h-btn" type="button" disabled>下载 MP4 ↓</button></div><details id="taskDetails" class="task-details" hidden><summary>查看任务信息</summary><p id="taskIdText"></p><p id="taskMessageText"></p><button id="retryButton" type="button" class="text-button" hidden>重新查询这个任务 ↗</button></details></section>
+            <section class="card recent-card"><div class="recent-heading"><div><p class="overline">RECENT FRAMES</p><h2>最近的灵感</h2></div><button id="seeAllButton" class="text-button" type="button">查看作品库 ↗</button></div><div id="recentList" class="recent-list"><p class="muted">连接后读取真实作品。</p></div></section>
+          </div>
+        </div>
+      </section>
+      <section id="view-library" class="view" aria-labelledby="libraryTitle"><div class="page-head"><p class="eyebrow">ALL YOUR FRAMES</p><h1 id="libraryTitle">作品库<span class="yellow-dot">.</span></h1><p>在这里继续查看已有作品与正在进行的任务。</p></div><div id="libraryNotice" class="notice"></div><div id="libraryGrid" class="library-grid"></div></section>
+      <section id="view-image" class="view" aria-labelledby="imageTitle"><div class="page-head"><p class="eyebrow">STILL IMAGINATION</p><h1 id="imageTitle">图像创作<span class="yellow-dot">.</span></h1><p>把一句描述，变成一张静止的画面。</p></div><form id="imageForm" class="card image-card"><div class="section-title"><span class="step">✦</span><div><h2>描述图像</h2><p>沿用现有文生图服务</p></div></div><label class="field-label" for="imagePrompt">提示词</label><textarea id="imagePrompt" required rows="5" placeholder="一只戴墨镜的橘猫，赛博朋克霓虹，电影感"></textarea><div class="image-controls"><label for="imageModel">模型<select id="imageModel"><option>Seedream 5.0 Lite</option><option>Seedream 5.0</option><option selected>Seedream 4.5</option><option>Seedream 4.0</option></select></label><label for="imageRatio">比例<select id="imageRatio"><option>1:1</option><option>16:9</option><option>9:16</option><option>4:3</option><option>3:4</option></select></label><button id="imageGenerateButton" class="primary-button h-btn" type="submit">生成图像 ↗</button></div><p id="imageNotice" class="form-notice" role="status"></p><div id="imageResults" class="image-results"></div></form></section>
+      <section id="view-settings" class="view" aria-labelledby="settingsTitle"><div class="page-head"><p class="eyebrow">MAKE THE CONNECTION</p><h1 id="settingsTitle">连接设置<span class="yellow-dot">.</span></h1><p>输入此本地服务的访问密钥，再回到创作页开始制作。</p></div><div class="settings-grid"><section class="card settings-card"><div class="section-title"><span class="step">✦</span><div><h2>本地服务密钥</h2><p>只在本机浏览器里使用</p></div></div><label class="field-label" for="apiKey">LOCAL_API_KEY</label><input id="apiKey" type="password" autocomplete="off" spellcheck="false" placeholder="输入本地服务密钥"><label class="remember"><input id="rememberKey" type="checkbox"> 记住这台设备</label><p class="muted">勾选后，密钥会保存在这个浏览器中；不勾选时只在当前页面使用。</p><button id="saveKeyButton" class="primary-button h-btn" type="button">应用连接 ↗</button><p id="keyNotice" class="form-notice" role="status"></p></section><section class="card settings-card"><div class="section-title"><span class="step">↗</span><div><h2>更多工具</h2><p>保留原有图像与账号管理功能</p></div></div><p>需要管理豆包登录、账号池、手动 Cookie、原有文生图或查看诊断日志时，进入高级管理页。</p><a class="secondary-button" href="/legacy.html">打开高级管理 ↗</a><details class="diagnostic"><summary>接口调用说明</summary><p>视频接口：<code>POST /v1/videos/generations</code>；任务查询：<code>GET /v1/videos/tasks/:id</code>。请求需使用 Bearer 密钥。</p></details></section></div></section>
+    </main>
+    <footer><span>轨映 / ORBIT FRAME</span><span>把灵感，留在画面里。 ✦</span></footer>
+  </div>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
