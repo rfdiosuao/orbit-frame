@@ -34,12 +34,19 @@ npm start
 
 视频链路在 macOS 上已实际验收：6 秒 9:16 小狐狸视频，生成文件 720×1280、视频轨 6.04 秒；HTTP 下载和完整 FFmpeg 解码通过。旧任务恢复、刷新与防止重复生成均有实际验证。内嵌浏览器下载按钮落盘没有独立核验；CLI 下载可直接保存文件。其他客户端版本和操作系统仍需现场验证。
 
+## 获取本地 API Key
+
+Key 是你自己设置的网关密码，保存在本机 `.env` 的 `LOCAL_API_KEY`，无需向豆包申请。macOS 已部署用户可运行 `npm run api:key -- --copy` 复制，粘贴到「连接设置」后验证连接。页面提供可复制的 cURL / Python API 示例。
+
 ## CLI 示例
 
 ```bash
-npm run video:desktop -- submit "清晨海边的小狐狸奔跑" --duration 6 --ratio 9:16 --key my-first-video --async
-npm run video:desktop -- status <task-id> --wait-seconds 45
-npm run video:desktop -- download <video-id> ./output.mp4
+# 一次调用，自动等待成片并保存
+npm run --silent video:desktop -- generate "清晨海边的小狐狸奔跑" --duration 6 --ratio 9:16 --key fox-auto-001 --output ./fox.mp4
+# 或分步提交、查询、下载
+npm run --silent video:desktop -- submit "清晨海边的小狐狸奔跑" --duration 6 --ratio 9:16 --key my-first-video --async
+npm run --silent video:desktop -- status <task-id> --wait-seconds 45
+npm run --silent video:desktop -- download <video-id> ./output.mp4
 ```
 
 密钥从本地 `.env` 读取，CLI 不打印密钥。查询时继续使用原任务 ID；同一 `--key` 只能用于相同请求。

@@ -1,3 +1,4 @@
+import { setupApiExamples } from '/api-examples.js';
 import { initPointerFX, runSplash } from '/heang/index.js';
 
 const $ = id => document.getElementById(id);
@@ -210,13 +211,27 @@ async function serviceStatus() {
   try { const response = await fetch('/health', { cache: 'no-store' }); if (!response.ok) throw new Error('offline'); $('serviceStatus').classList.add('online'); $('serviceStatus').lastChild.textContent = ' 本地服务在线'; }
   catch { $('serviceStatus').classList.remove('online'); $('serviceStatus').lastChild.textContent = ' 本地服务未连接'; }
 }
-function applyKey() {
-  apiKey = $('apiKey').value.trim();
-  if ($('rememberKey').checked && apiKey) localStorage.setItem(SAVED_KEY, apiKey);
-  else localStorage.removeItem(SAVED_KEY);
-  $('keyNotice').textContent = apiKey ? '已应用。现在可以创作，并读取这台设备上的作品。' : '请输入本地服务密钥。';
-  $('keyNotice').classList.toggle('error', !apiKey);
-  if (apiKey) { loadHistory(); const draft = activeDraft(); if (draft?.taskId) queryTask(draft.taskId, { manual: true }); }
+async function applyKey() {
+  const candidate = $('apiKey').value.trim();
+  $('saveKeyButton').disabled = true;
+  $('keyNotice').textContent = '正在验证连接…';
+  try {
+    if (!candidate) throw new Error('请输入本地服务密钥。');
+    const response = await fetch('/v1/videos/tasks', { headers: { Authorization: `Bearer ${candidate}` }, signal: AbortSignal.timeout(10000) });
+    if (response.status === 401) throw new Error('密钥无效，请检查本机 .env 的 LOCAL_API_KEY。');
+    if (!response.ok) throw new Error(`网关暂时不可用（HTTP ${response.status}）。`);
+    await response.json();
+    apiKey = candidate;
+    try { if ($('rememberKey').checked) localStorage.setItem(SAVED_KEY, apiKey); else localStorage.removeItem(SAVED_KEY); } catch {}
+    $('keyNotice').textContent = '连接验证成功。可以生成视频和读取作品。';
+    $('keyNotice').classList.remove('error');
+    loadHistory(); const draft = activeDraft(); if (draft?.taskId) queryTask(draft.taskId, { manual: true });
+  } catch (error) {
+    apiKey = '';
+    try { localStorage.removeItem(SAVED_KEY); } catch {}
+    $('keyNotice').textContent = error.name === 'TimeoutError' ? '连接超时，请确认网关已启动。' : error.message;
+    $('keyNotice').classList.add('error');
+  } finally { $('saveKeyButton').disabled = false; }
 }
 async function generateImage(event) {
   event.preventDefault();
@@ -256,6 +271,7 @@ function setup() {
   else if (draft?.taskId) { setBadge('等待连接'); $('previewName').textContent = '有一个待恢复任务'; setNotice('请在连接设置中输入密钥，恢复同一个任务。'); }
   else if (draft) setNotice('有一次提交结果未确认。保持相同设置再次点击生成会沿用原请求。');
   serviceStatus(); setInterval(serviceStatus, 30000); loadHistory();
+  setupApiExamples();
   initPointerFX(); runSplash({ minMs: 650 });
 }
 setup();

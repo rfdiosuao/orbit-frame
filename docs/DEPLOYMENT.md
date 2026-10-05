@@ -60,7 +60,7 @@ npm start
 
 ## 5. 在页面生成视频
 
-1. 「连接设置」输入 `.env` 中的 `LOCAL_API_KEY`，点击「应用连接」。默认仅在当前页面使用；勾选「记住这台设备」才持久保存。
+1. 「连接设置」展开「API Key 从哪里获取？」。这是自己设置的网关密码，不是豆包提供的 Key。运行 `npm run api:key -- --copy`（macOS）复制已有密钥，粘贴后点击「验证并连接」。错误密钥会显示验证失败。默认仅在当前页面使用；勾选「记住这台设备」才持久保存。
 2. 「视频创作」填写场景、动作、镜头、氛围。
 3. 视频时长填写 1–15 的整数秒；画面比例选横屏、竖屏或方形。格式统一为 MP4。
 4. 点击生成。默认请求 Seedance 2.0 Fast，实际模型 ID 未独立核验。
@@ -71,10 +71,24 @@ npm start
 
 ## 6. CLI 生成与自动提取
 
+一次调用，自动查询直到成片并下载（默认等待最多 900 秒）：
+
 ```bash
-npm run video:desktop -- submit "清晨的海边，小狐狸在沙滩奔跑，低机位跟拍" --duration 6 --ratio 9:16 --key fox-video-001 --async
-npm run video:desktop -- status <task-id> --wait-seconds 45
-npm run video:desktop -- download <video-id> ./fox.mp4
+npm run --silent video:desktop -- generate "小狐狸在海边奔跑" --duration 6 --ratio 9:16 --key fox-auto-001 --output ./fox.mp4
+```
+
+进度输出到 stderr，最终 JSON 输出到 stdout，便于程序解析。`--timeout-seconds` 可设 1–86400；超时或需要输入返回退出码 2，并保留任务 ID。超时不会取消生成。继续原任务，不再次提交：
+
+```bash
+npm run --silent video:desktop -- generate --task <task-id> --output ./fox.mp4
+```
+
+已有文件不会被覆盖，只有 completed 且有有效 MP4 才下载。异步提交方式也保留：
+
+```bash
+npm run --silent video:desktop -- submit "清晨的海边，小狐狸在沙滩奔跑，低机位跟拍" --duration 6 --ratio 9:16 --key fox-video-001 --async
+npm run --silent video:desktop -- status <task-id> --wait-seconds 45
+npm run --silent video:desktop -- download <video-id> ./fox.mp4
 ```
 
 用实际返回值替换 `<task-id>` 和 `<video-id>`。`--async` 返回任务后即可退出；后续查询推动恢复、参数确认和提取。未加 `--async` 会等待一段时间，但超时不等于失败，继续查询原任务。CLI 输出 JSON，可由其他程序解析。下载不覆盖已存在文件。
@@ -84,7 +98,7 @@ npm run video:desktop -- download <video-id> ./fox.mp4
 知道客户端会话和运行 ID 时，可恢复：
 
 ```bash
-npm run video:desktop -- recover <conversation-id> <run-id>
+npm run --silent video:desktop -- recover <conversation-id> <run-id>
 ```
 
 ## 7. HTTP API
@@ -128,3 +142,18 @@ node --test tests/enterprise-video-confirmation.mjs tests/enterprise-video-extra
 ```
 
 作品库安全测试会在临时端口启动测试网关，并读取本机任务元数据；不会生成视频。自动测试不能替代你的账户下实际生成、预览和下载验收。
+
+
+## 10. API Key 与网站 API 的关系
+
+`LOCAL_API_KEY` 是你自己为本机网关设置的访问密码，并非豆包账号密钥、Cookie、GitHub Key 或官方云端 API Key。豆包生成权限来自已登录客户端账户；两个环节缺一不可。
+
+- 已部署用户：本机 `.env` 已有 `LOCAL_API_KEY`，可以继续使用；`npm run api:key -- --copy` 只复制到 macOS 剪贴板，不在终端显示。
+- 新部署用户：按照第 2 节生成随机值，写入 `.env` 的 `LOCAL_API_KEY`，重启网关。
+- 网页：在连接设置粘贴此 Key 并验证。
+- HTTP 调用：请求头为 `Authorization: Bearer <LOCAL_API_KEY>`。
+- 项目 CLI：自动读取本机 `.env`，无需手工传 Key。
+
+连接设置中的「API 调用示例」提供可复制的 cURL 和 Python 示例，包括提交、查询、下载。示例使用环境变量，不嵌入真实密钥。macOS zsh 可用 `read -rs API_KEY; export API_KEY` 输入密钥（输入时不可见），Python 示例需 `pip install requests`。
+
+网关默认只在本机 `http://127.0.0.1:8787` 可用。其他电脑的 127.0.0.1 指向它们自己；部署到其他电脑后应调用那台电脑的网关。当前教程没有配置公网服务。仓库网站地址也不是视频 API 地址。

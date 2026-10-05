@@ -12,7 +12,8 @@
     "login:switch": "node src/login-browser.js --switch",
     "video:desktop": "node scripts/doubao-video.mjs",
     "setup": "npm install && npx playwright install chromium && npm run setup:upstream",
-    "setup:upstream": "npm install --prefix vendor/doubao-free-api --registry https://registry.npmmirror.com && npm run build --prefix vendor/doubao-free-api"
+    "setup:upstream": "npm install --prefix vendor/doubao-free-api --registry https://registry.npmmirror.com && npm run build --prefix vendor/doubao-free-api",
+    "api:key": "node scripts/api-key.mjs"
   },
   "engines": {
     "node": ">=22.13"
