@@ -5,16 +5,70 @@ import { lookup } from 'node:dns/promises';
 import net from 'node:net';
 import { spawn } from 'node:child_process';
 import { withApp, resolveApp } from 'doubao-cli/src/app.mjs';
-import { withChatClient } from 'doubao-cli/src/cdp.mjs';
+import { CdpClient, cdpStatus, findChatTarget } from 'doubao-cli/src/cdp.mjs';
 import { createConversation, waitConversation } from 'doubao-cli/src/automation.mjs';
 import { readTurn, messageBlocks, receiptStore } from 'doubao-cli/src/turns.mjs';
 import { APP_MODULE_BOOTSTRAP } from 'doubao-cli/src/app-modules.mjs';
 import { config } from './config.js';
 
 const idPattern = /^\d{12,24}$/;
-const mediaHosts = /^(?:[a-z0-9-]+\.)*(?:douyin\.com|douyinvod\.com|byteimg\.com)$/i;
+const mediaHosts = /^(?:(?:[a-z0-9-]+\.)*(?:douyin\.com|douyinvod\.com|byteimg\.com|doubaocdn\.com)|v\d+-vdl\.doubao\.com)$/i;
+// Seedance agent replies may deliver the video only as a short link in text.
+const shortVideoLink = /https:\/\/aka\.doubaocdn\.com\/s\/([A-Za-z0-9_-]{4,64})(?![A-Za-z0-9_\/-])/g;
+const maxTextLinks = 4;
 const maxBytes = 100 * 1024 * 1024;
 const videoDir = path.join(config.dataDir, 'videos');
+const idleCloseMs = 120_000;
+
+// All Doubao CDP work runs on one process-wide lane over one reused chat-page
+// connection, so concurrent watchers and API calls never read the same
+// session at the same time or reconnect for every query.
+let lane = Promise.resolve();
+let shared = null;
+let idleTimer = null;
+const inflight = new Map();
+
+function cdpExclusive(work) {
+  const run = lane.then(() => withApp(resolveApp('doubao'), work));
+  lane = run.catch(() => {});
+  return run;
+}
+
+async function sharedClient() {
+  clearTimeout(idleTimer);
+  if (shared?.socket?.readyState === WebSocket.OPEN) return shared;
+  shared = null;
+  const status = await cdpStatus();
+  if (!status.available) throw new Error(status.error || 'Doubao CDP is unavailable');
+  const target = await findChatTarget();
+  const client = await new CdpClient(target.webSocketDebuggerUrl).connect();
+  client.socket.addEventListener('close', () => { if (shared === client) shared = null; });
+  shared = client;
+  return client;
+}
+
+function releaseLater() {
+  clearTimeout(idleTimer);
+  idleTimer = setTimeout(() => { shared?.close(); shared = null; }, idleCloseMs);
+  idleTimer.unref?.();
+}
+
+export function withDoubaoClient(work) {
+  return cdpExclusive(async () => {
+    try { return await work(await sharedClient()); }
+    catch (error) {
+      if (shared && shared.socket?.readyState !== WebSocket.OPEN) shared = null;
+      throw error;
+    } finally { releaseLater(); }
+  });
+}
+
+function singleFlight(key, work) {
+  if (inflight.has(key)) return inflight.get(key);
+  const run = work().finally(() => inflight.delete(key));
+  inflight.set(key, run);
+  return run;
+}
 
 function validId(value, name) {
   const id = String(value || '');
@@ -93,7 +147,29 @@ export function extractRunVideos(snapshot) {
       }
     }
   }
+  if (found.length) return found;
+  // Fallback: short links in assistant text (user_type 2) only, never in user
+  // messages; the MP4 is still probed and checked against the request.
+  const links = new Set();
+  for (const message of [...snapshot.messages, ...snapshot.nodes.flatMap(node => node.messages)]) {
+    if (Number(message.user_type) !== 2) continue;
+    for (const block of messageBlocks(message)) {
+      if (Number(block.block_type) !== 10000) continue;
+      for (const match of String(block.content?.text_block?.text || '').matchAll(shortVideoLink)) {
+        if (links.size >= maxTextLinks) break;
+        if (links.has(match[0])) continue;
+        links.add(match[0]);
+        found.push({ kind: 'link', messageId: String(message.message_id), blockId: String(block.block_id || ''),
+          creationId: match[1], vid: '', width: null, height: null, duration: null, source: match[0] });
+      }
+    }
+  }
   return found;
+}
+
+function ratioMatches(width, height, ratio) {
+  const [w, h] = String(ratio).split(':').map(Number);
+  return w > 0 && h > 0 && Math.abs(width / height / (w / h) - 1) <= 0.05;
 }
 
 function boxes(data, start, end) {
@@ -189,7 +265,7 @@ async function downloadMp4(rawUrl, file) {
 export async function inspectEnterpriseRun(conversationId, runId) {
   validId(conversationId, 'conversation_id');
   validId(runId, 'run_id');
-  return withApp(resolveApp('doubao'), () => withChatClient(async client => {
+  return singleFlight(`inspect:${conversationId}:${runId}`, () => withDoubaoClient(async client => {
     const receipts = await receiptStore(client);
     const snapshot = await readTurn(client, conversationId, { runId, receipt: receipts.read(conversationId, runId) });
     return { status: snapshot.result.status, pending: snapshot.result.pending || [],
@@ -209,7 +285,7 @@ export function isEligibleVideoConfirmationAsk(ask, answeredIds = []) {
   const question = ask?.questions?.[0];
   if (!question) return false;
   if (!(ask?.status === 1 && !answeredIds.includes(ask.clarify_id) && ask.questions?.length === 1 &&
-      ['confirm_video_gen', 'confirm_video_generate', 'confirm_video_generation', 'final_generation_confirm', 'confirm_generate_video'].includes(question.question_id) &&
+      ['confirm_video_gen', 'confirm_video_generate', 'confirm_video_generation', 'final_generation_confirm', 'confirm_generate_video', 'final_video_confirm'].includes(question.question_id) &&
       /确认|是否/.test(question.title || '') && /生成/.test(question.title || '') && /视频|参数/.test(question.title || '') &&
       !/支付|付费|收费|充值|购买|费用|扣费/.test(question.title || ''))) return false;
   return question.type === 3 && question.question_capability?.allow_text === true ||
@@ -219,7 +295,7 @@ export function isEligibleVideoConfirmationAsk(ask, answeredIds = []) {
 export async function confirmEnterpriseVideoAsk(conversationId, runId, options = {}, answeredIds = [], beforeSubmit = async () => {}) {
   validId(conversationId, 'conversation_id');
   validId(runId, 'run_id');
-  return withApp(resolveApp('doubao'), () => withChatClient(async client => {
+  return withDoubaoClient(async client => {
     const receipts = await receiptStore(client);
     const snapshot = await readTurn(client, conversationId, { runId, receipt: receipts.read(conversationId, runId) });
     const asks = snapshot.messages.flatMap(messageBlocks)
@@ -231,7 +307,8 @@ export async function confirmEnterpriseVideoAsk(conversationId, runId, options =
     const model = options.model || 'Seedance 2.0 Fast';
     const duration = Number(options.duration || 5);
     const ratio = options.ratio || '16:9';
-    const reply = `确认，仅按本次已授权参数生成1条 ${model}、${duration}秒、${ratio} 视频。立即提交并等待可播放视频。`;
+    const modeText = { image_to_video: '、首帧图生', first_last_frame: '、首尾帧' }[options.mode] || '';
+    const reply = `确认，仅按本次已授权参数生成1条 ${model}、${duration}秒、${ratio}${modeText} 视频。立即提交并等待可播放视频。`;
     const answered = { ...ask, status: 2, questions: [{ ...q, answer: {
       status: 2, selected_option_ids: q.type === 1 ? [videoConfirmationOption(q)] : [],
       ...(q.question_capability?.allow_text === true ? { capability_answer: { text: reply } } : {}), question_id: q.question_id,
@@ -249,16 +326,20 @@ export async function confirmEnterpriseVideoAsk(conversationId, runId, options =
     })()`);
     if (result?.code !== 0) throw new Error('Doubao rejected the video confirmation');
     return { confirmed: true, clarifyId: ask.clarify_id };
-  }));
+  });
 }
 
-export async function recoverEnterpriseVideo(conversationId, runId) {
-  const state = await inspectEnterpriseRun(conversationId, runId);
+// Pass `state` from a fresh inspectEnterpriseRun() to skip a second CDP read;
+// `onPhase` reports extracting/validating progress to the job store.
+// `expect` ({ duration, ratio }) is enforced for text-link videos, which carry no metadata of their own.
+export async function recoverEnterpriseVideo(conversationId, runId, { state: known, onPhase = async () => {}, expect = null } = {}) {
+  const state = known || await inspectEnterpriseRun(conversationId, runId);
   if (state.status !== 'completed' || !state.videos.length) {
     return { conversationId, runId, status: state.status === 'completed' ? 'video_missing' : state.status,
       pending: state.pending, videos: [], message: state.message };
   }
   await fs.mkdir(videoDir, { recursive: true, mode: 0o700 });
+  await onPhase('extracting');
   const videos = [];
   for (const video of state.videos) {
     const id = createHash('sha256').update([conversationId, runId, video.messageId, video.creationId, video.vid].join(':')).digest('hex').slice(0, 32);
@@ -272,10 +353,15 @@ export async function recoverEnterpriseVideo(conversationId, runId) {
       if (error.code !== 'ENOENT') throw error;
       downloaded = await downloadMp4(video.source, file);
     }
+    await onPhase('validating');
     if (video.expectedBytes && downloaded.bytes !== video.expectedBytes) throw new Error('Downloaded MP4 size does not match the file block');
     const probe = probeMp4(await fs.readFile(file));
     if (video.width && (probe.width !== video.width || probe.height !== video.height || Math.abs(probe.duration - video.duration) > 1)) {
       throw new Error('Downloaded MP4 does not match the video block');
+    }
+    if (video.kind === 'link' && expect?.duration && (Math.abs(probe.duration - expect.duration) > 1.5 ||
+      expect.ratio && !ratioMatches(probe.width, probe.height, expect.ratio))) {
+      throw new Error('Linked MP4 does not match the requested duration or ratio');
     }
     videos.push({ id, file, url: `/v1/videos/files/${id}`, width: probe.width,
       height: probe.height, duration: probe.duration, bytes: downloaded.bytes,
@@ -285,24 +371,34 @@ export async function recoverEnterpriseVideo(conversationId, runId) {
   return { conversationId, runId, status: 'completed', videos, message: state.message };
 }
 
-export async function submitEnterpriseVideo(prompt, options = {}) {
+const frameInstruction = {
+  image_to_video: '附件图片（first_frame）是视频首帧，请以它为第一帧做图生视频。',
+  first_last_frame: '这是首尾帧视频：第一个附件（first_frame）是首帧，第二个附件（last_frame）是尾帧，请用首尾帧模式生成。',
+};
+
+// `attachments` are local image paths in role order (first_frame, then last_frame).
+export async function submitEnterpriseVideo(prompt, options = {}, attachments = []) {
   const model = options.model || 'Seedance 2.0 Fast';
   const duration = Number(options.duration || 5);
   const ratio = options.ratio || '16:9';
   if (!Number.isInteger(duration) || duration < 1 || duration > 15) throw new Error('duration must be 1 to 15 seconds');
   if (!/^\d{1,2}:\d{1,2}$/.test(ratio)) throw new Error('ratio must be like 16:9');
-  const instruction = `请调用 ${model} 生成一个${duration}秒、${ratio}的视频。画面要求：${prompt}`;
-  const result = await withApp(resolveApp('doubao'), () => createConversation(instruction, {
+  const mode = options.mode || 'text_to_video';
+  const roles = { text_to_video: 0, image_to_video: 1, first_last_frame: 2 }[mode];
+  if (roles === undefined || attachments.length !== roles) throw new Error('attachments do not match the video mode');
+  const instruction = `请调用 ${model} 生成一个${duration}秒、${ratio}的视频。${frameInstruction[mode] || ''}画面要求：${prompt}`;
+  const result = await cdpExclusive(() => createConversation(instruction, {
     runtime: 'cloud', project: 'none', waitForReply: false, timeoutMs: 120_000,
+    ...(attachments.length ? { attachments } : {}),
   }));
   return { conversationId: result.conversationId, runId: result.runId, status: result.status,
     requestedModel: model, modelVerification: 'requested_only' };
 }
 
 export async function waitEnterpriseRun(conversationId, runId, timeoutMs = 540_000) {
-  return withApp(resolveApp('doubao'), () => waitConversation(validId(conversationId, 'conversation_id'), {
-    runId: validId(runId, 'run_id'), timeoutMs,
-  }));
+  validId(conversationId, 'conversation_id');
+  validId(runId, 'run_id');
+  return cdpExclusive(() => waitConversation(conversationId, { runId, timeoutMs }));
 }
 
 export async function enterpriseVideoFile(id) {

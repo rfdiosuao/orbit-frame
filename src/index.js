@@ -3,6 +3,7 @@ import { config } from "./config.js";
 import { sweepExpiredCooldowns, listAccounts } from "./session-store.js";
 import { logger } from "./logger.js";
 import { isCdpEnabled } from "./cdp-samantha.js";
+import { wakeEnterpriseVideoWatcher } from "./enterprise-video-jobs.js";
 
 const app = createApp();
 
@@ -14,6 +15,9 @@ app.listen(config.port, "127.0.0.1", () => {
     cdp: isCdpEnabled(),
     logFile: logger.filePath(),
   });
+
+  // Resume watching enterprise video jobs that were running before a restart.
+  wakeEnterpriseVideoWatcher();
 
   setInterval(async () => {
     try {

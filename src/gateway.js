@@ -22,7 +22,8 @@ import {
 import { loginAndCaptureSession } from "./login-browser.js";
 import { generateVideo } from "./video-client.js";
 import { enterpriseVideoFile } from "./enterprise-video-client.js";
-import { startEnterpriseVideoJob, getEnterpriseVideoJob, recoverEnterpriseVideoJob, listEnterpriseVideoJobs } from "./enterprise-video-jobs.js";
+import { startEnterpriseVideoJob, getEnterpriseVideoJob, recoverEnterpriseVideoJob, listEnterpriseVideoJobs,
+  refreshEnterpriseVideoJob, jobEvents } from "./enterprise-video-jobs.js";
 import { generateImage, RateLimitError } from "./image-client.js";
 import {
   probeCdp,
@@ -112,9 +113,10 @@ function enterpriseVideoResponse(job, prompt = "") {
   }));
   return {
     created: Math.floor(new Date(job.created_at).getTime() / 1000),
-    provider: 'doubao-desktop', task_id: job.id, status: job.status,
+    provider: 'doubao-desktop', task_id: job.id, status: job.status, phase: job.phase ?? null,
     conversation_id: job.conversation_id, run_id: job.run_id,
     prompt: job.prompt, duration: job.duration, ratio: job.ratio,
+    mode: job.mode, frames: job.frames, warnings: job.warnings,
     created_at: job.created_at, updated_at: job.updated_at,
     requested_model: job.requested_model, model_verification: job.model_verification,
     data: videos.map(video => ({ url: video.video_url, revised_prompt: prompt || undefined })),
@@ -702,11 +704,11 @@ export function createApp() {
         try {
           const started = await startEnterpriseVideoJob(body);
           const waitMs = body.async === true || body.wait === false ? 0 : Math.min(540_000, Math.max(0, Number(body.wait_seconds ?? 540) * 1000));
-          const job = await getEnterpriseVideoJob(started.id, { waitMs });
+          const job = waitMs ? await getEnterpriseVideoJob(started.id, { waitMs }) : started;
           const result = enterpriseVideoResponse(job, body.prompt);
           return res.status(job.status === 'completed' ? 200 : job.status === 'running' || job.status === 'submitting' ? 202 : 200).json(result);
         } catch (error) {
-          const invalid = /prompt|duration|ratio|idempotency_key/.test(String(error.message));
+          const invalid = error.invalid || /prompt|duration|ratio|idempotency_key/.test(String(error.message));
           return res.status(invalid ? 400 : 502).json({ error: {
             type: invalid ? 'invalid_request' : 'enterprise_video_error',
             message: invalid ? String(error.message) : '企业豆包视频任务暂时不可用；可用已返回的任务 ID 继续查询。',
@@ -820,7 +822,9 @@ export function createApp() {
   app.get("/v1/videos/tasks/:id", requireLocalKey, async (req, res) => {
     try {
       const waitMs = Math.min(60_000, Math.max(0, Number(req.query.wait_seconds || 0) * 1000));
-      const job = await getEnterpriseVideoJob(req.params.id, { waitMs });
+      const job = req.query.refresh === '1'
+        ? await refreshEnterpriseVideoJob(req.params.id)
+        : await getEnterpriseVideoJob(req.params.id, { waitMs });
       if (!job) return res.status(404).json({ error: { type: 'task_not_found', message: '视频任务不存在' } });
       return res.status(job.status === 'completed' ? 200 : 202).json(enterpriseVideoResponse(job));
     } catch {
@@ -828,11 +832,30 @@ export function createApp() {
     }
   });
 
+  // Server-sent status updates for one task; closes once the task stops moving.
+  app.get("/v1/videos/tasks/:id/events", requireLocalKey, async (req, res) => {
+    let job;
+    try { job = await getEnterpriseVideoJob(req.params.id); }
+    catch { return res.status(502).json({ error: { type: 'enterprise_video_error', message: '视频任务查询暂时失败，请稍后重试。' } }); }
+    if (!job) return res.status(404).json({ error: { type: 'task_not_found', message: '视频任务不存在' } });
+    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive' });
+    req.setTimeout?.(0);
+    const id = job.id;
+    const send = current => {
+      res.write(`event: status\ndata: ${JSON.stringify(enterpriseVideoResponse(current))}\n\n`);
+      if (!['submitting', 'running'].includes(current.status)) close();
+    };
+    const heartbeat = setInterval(() => res.write(': keep-alive\n\n'), 15_000);
+    const close = () => { clearInterval(heartbeat); jobEvents.off(id, send); res.end(); };
+    jobEvents.on(id, send);
+    req.on('close', close);
+    send(job);
+  });
+
   app.post("/v1/videos/recover", requireLocalKey, async (req, res) => {
     try {
       const job = await recoverEnterpriseVideoJob(req.body?.conversation_id, req.body?.run_id);
-      const current = await getEnterpriseVideoJob(job.id);
-      return res.status(current.status === 'completed' ? 200 : 202).json(enterpriseVideoResponse(current));
+      return res.status(job.status === 'completed' ? 200 : 202).json(enterpriseVideoResponse(job));
     } catch {
       return res.status(400).json({ error: { type: 'invalid_recovery', message: '无法恢复指定会话和 run。' } });
     }

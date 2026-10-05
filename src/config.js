@@ -14,6 +14,8 @@ export const config = {
   localApiKey: ensureLocalApiKey(root, process.env.LOCAL_API_KEY),
   upstreamUrl: (process.env.UPSTREAM_URL || "http://127.0.0.1:8001").replace(/\/$/, ""),
   dataDir: path.join(root, "data"),
+  // Only images inside this directory may be used as video reference frames.
+  mediaDir: path.resolve(root, process.env.ORBIT_FRAME_MEDIA_DIR || "data/media"),
   sessionFile: path.join(root, "data", "session.json"),
   logDir: path.resolve(root, process.env.LOG_DIR || "data/logs"),
   browserProfileDir: path.resolve(

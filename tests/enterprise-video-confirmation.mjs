@@ -34,3 +34,13 @@ test('accepts the actual video generation choice while rejecting ambiguous or pa
   assert.equal(isEligibleVideoConfirmationAsk({...choiceAsk,questions:[{...choiceAsk.questions[0],...change}]}),false);
  }
 });
+
+test('accepts the desktop Seedance final_video_confirm choice', () => {
+  const ask = { status: 1, clarify_id: 'desktop-choice', questions: [{
+    question_id: 'final_video_confirm', type: 1, title: '以上参数是否确认开始生成？',
+    options: [{ label: '按要求生成', description: '使用 Seedance 2.0 Fast 生成 5 秒 16:9 首尾帧过渡视频，仅生成一次', option_id: 'generate' },
+      { label: '暂不生成', description: '停止本次生成，不调用视频工具', option_id: 'cancel' }],
+    question_capability: { allow_text: true },
+  }] };
+  assert.equal(isEligibleVideoConfirmationAsk(ask), true);
+});

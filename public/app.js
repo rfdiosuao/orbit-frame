@@ -7,14 +7,14 @@ const SAVED_KEY = 'doubao_local_api_key';
 let localConnection = null;
 const terminal = new Set(['completed', 'failed', 'cancelled', 'video_missing']);
 const paused = new Set(['waiting_input', 'unknown', 'extraction_failed', 'video_missing', 'failed', 'cancelled']);
-const retryable = new Set(['waiting_input', 'unknown', 'extraction_failed']);
+const retryable = new Set(['waiting_input', 'unknown', 'extraction_failed', 'video_missing']);
 const statusText = {
   submitting: ['正在提交', '请求已发出，等待任务确认。'],
   running: ['画面正在路上', '视频正在生成；完成后会自动出现在这里。'],
   waiting_input: ['需要进一步确认', '任务等待输入，请查看任务信息并在豆包客户端处理。'],
   unknown: ['状态暂时无法确认', '请稍后重新查询这个任务；不会重复提交。'],
   extraction_failed: ['视频提取未完成', '任务已结束，但文件提取或校验失败。请重新查询。'],
-  video_missing: ['未找到视频文件', '任务已结束，但未取得有效视频。'],
+  video_missing: ['未找到视频文件', '任务已结束，但未取得有效视频。可以重新查询以再次提取。'],
   failed: ['生成未完成', '此任务失败。可以查看任务信息后再决定是否重新创作。'],
   cancelled: ['任务已取消', '这个任务没有生成视频。'],
   completed: ['视频已完成', '现在可以预览和下载 MP4。'],
@@ -28,6 +28,17 @@ let elapsedTimer = null;
 let requestBusy = false;
 let generationBusy = false;
 let history = [];
+let streamAbort = null;
+let streamUnsupported = false;
+let lastStatus = null;
+const phaseText = {
+  extracting: ['正在提取视频', '豆包已生成完成，正在下载 MP4。'],
+  validating: ['正在校验文件', '正在检查 MP4 尺寸与时长，马上可以预览。'],
+};
+const phases = [
+  ['submitted', '已提交'], ['generating', '豆包生成中'], ['awaiting_confirmation', '等待确认'],
+  ['extracting', '提取视频'], ['validating', '文件校验'], ['ready', '可预览'],
+];
 
 function readJSON(key) { try { return JSON.parse(localStorage.getItem(key) || 'null'); } catch { return null; } }
 function saveActive(value) { try { localStorage.setItem(ACTIVE_KEY, JSON.stringify(value)); } catch {} }
@@ -46,6 +57,8 @@ function statusLabel(status) { return statusText[status]?.[0] || '正在确认�
 function secondsBetween(value) { const t = new Date(value).getTime(); return Number.isFinite(t) ? Math.max(0, Math.floor((Date.now() - t) / 1000)) : 0; }
 function formatElapsed(n) { const m = Math.floor(n / 60); return m ? `${m} 分 ${n % 60} 秒` : `${n} 秒`; }
 function activeDraft() { return readJSON(ACTIVE_KEY); }
+// `/?task=<id>` opens one task, e.g. from the MCP preview_url.
+function linkedTask() { const id = new URLSearchParams(location.search).get('task') || ''; return /^(?:[0-9a-f-]{36}|[0-9a-f]{64})$/.test(id) ? id : ''; }
 function validVideo(video) { return video && /^[0-9a-f]{32,64}$/i.test(String(video.id || '')); }
 
 async function api(path, options = {}) {
@@ -87,7 +100,51 @@ function startElapsed(job) {
   tick(); elapsedTimer = setInterval(tick, 1000);
 }
 function stopElapsed() { clearInterval(elapsedTimer); elapsedTimer = null; }
-function schedulePoll(id) { clearTimeout(pollTimer); pollTimer = setTimeout(() => queryTask(id), 4200); }
+// Fast right after submit, slower while Doubao renders, slowest for long jobs.
+function pollDelay(job) {
+  const age = secondsBetween(job?.created_at || activeDraft()?.createdAt);
+  return age < 20 ? 1500 : age < 180 ? 6000 : 12000;
+}
+function schedulePoll(job) { clearTimeout(pollTimer); pollTimer = setTimeout(() => queryTask(job.task_id), pollDelay(job)); }
+function stopStream() { streamAbort?.abort(); streamAbort = null; }
+// SSE over fetch so the key stays in the Authorization header, not the URL.
+async function watchTask(job) {
+  stopStream();
+  const controller = new AbortController();
+  streamAbort = controller;
+  try {
+    const response = await fetch(`/v1/videos/tasks/${encodeURIComponent(job.task_id)}/events`, { headers: { Authorization: `Bearer ${getKey()}` }, signal: controller.signal });
+    if (!response.ok || !response.body) { streamUnsupported = response.status !== 401; throw new Error('stream unavailable'); }
+    const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+    let buffer = '';
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += value;
+      let end;
+      while ((end = buffer.indexOf('\n\n')) >= 0) {
+        const chunk = buffer.slice(0, end); buffer = buffer.slice(end + 2);
+        const data = chunk.split('\n').filter(line => line.startsWith('data: ')).map(line => line.slice(6)).join('\n');
+        if (data && streamAbort === controller) await showTask(JSON.parse(data), { poll: false });
+      }
+    }
+  } catch { /* Fall back to polling below. */ }
+  if (streamAbort !== controller) return;
+  streamAbort = null;
+  if (['running', 'submitting'].includes(currentTask?.status) && currentTask.task_id === job.task_id) schedulePoll(currentTask);
+}
+function renderPhases(job) {
+  const list = $('phaseSteps');
+  const current = phases.findIndex(([key]) => key === job.phase);
+  list.hidden = current < 0;
+  list.replaceChildren(...phases.map(([key, label], index) => {
+    const item = document.createElement('li');
+    item.textContent = label;
+    item.className = index < current ? 'done' : index === current ? 'current' : '';
+    if (index === current) item.setAttribute('aria-current', 'step');
+    return item;
+  }));
+}
 
 async function loadVideo(video) {
   if (!validVideo(video)) throw new Error('任务没有可用的视频文件。');
@@ -106,7 +163,7 @@ async function showTask(job, { poll = true } = {}) {
   currentTask = job;
   clearTimeout(pollTimer);
   const status = job.status || 'unknown';
-  const [headline, description] = statusText[status] || ['正在确认状态', '可以稍后重新查询。'];
+  const [headline, description] = (status === 'running' && phaseText[job.phase]) || statusText[status] || ['正在确认状态', '可以稍后重新查询。'];
   $('previewLoading').classList.toggle('is-paused', paused.has(status) || status === 'completed');
   const draft = activeDraft();
   $('previewName').textContent = titleFor({ prompt: job.prompt || (draft?.taskId === job.task_id ? draft.prompt : ''), created_at: job.created_at || draft?.createdAt });
@@ -114,6 +171,10 @@ async function showTask(job, { poll = true } = {}) {
   $('previewDetail').textContent = [job.duration || ownDraft?.duration ? `${job.duration || ownDraft.duration} 秒` : '', job.ratio || ownDraft?.ratio || '', 'MP4'].filter(Boolean).join(' · ');
   setBadge(headline);
   taskInfo(job);
+  renderPhases(job);
+  const changed = lastStatus !== status;
+  lastStatus = status;
+  if (changed && !['running', 'submitting'].includes(status)) loadHistory();
   $('loadingTitle').textContent = headline;
   $('loadingDescription').textContent = description;
   if (status === 'completed' && Array.isArray(job.videos) && job.videos.some(validVideo)) {
@@ -126,7 +187,7 @@ async function showTask(job, { poll = true } = {}) {
     if (paused.has(status)) { stopElapsed(); setNotice(description, true); }
     else setNotice('任务已接收。页面刷新后仍可继续查看同一个任务。');
     if (terminal.has(status) && activeDraft()?.taskId === job.task_id) removeActive();
-    if (poll && ['running', 'submitting'].includes(status)) schedulePoll(job.task_id);
+    if (poll && ['running', 'submitting'].includes(status)) { if (streamUnsupported) schedulePoll(job); else watchTask(job); }
   }
   generationBusy = false;
   $('generateButton').disabled = false;
@@ -136,11 +197,12 @@ async function queryTask(id, { manual = false } = {}) {
   if (requestBusy || !id) return;
   requestBusy = true;
   clearTimeout(pollTimer);
-  if (manual) { $('retryButton').disabled = true; setNotice('正在查询原任务，不会重新提交。'); }
+  if (manual) { stopStream(); $('retryButton').disabled = true; setNotice('正在查询原任务，不会重新提交。'); }
   try {
-    const job = await api(`/v1/videos/tasks/${encodeURIComponent(id)}`);
-    await showTask(job);
-    await loadHistory();
+    // Only a manual retry of a paused task asks the gateway to re-read Doubao.
+    const refresh = manual && retryable.has(currentTask?.task_id === id ? currentTask.status : '');
+    const job = await api(`/v1/videos/tasks/${encodeURIComponent(id)}${refresh ? '?refresh=1' : ''}`);
+    await showTask(job, { poll: manual || !streamAbort });
   } catch (error) {
     clearTimeout(pollTimer);
     $('retryButton').hidden = false;
@@ -181,7 +243,7 @@ async function submitVideo(event) {
     if (!job?.task_id) throw new Error('服务没有返回任务 ID。请使用相同设置重试。');
     draft.taskId = job.task_id; saveActive(draft);
     await showTask({ ...job, prompt, duration, ratio, created_at: draft.createdAt });
-    await loadHistory();
+    loadHistory();
   } catch (error) { generationBusy = false; $('generateButton').disabled = false; $('generateButton').innerHTML = '重试同一次提交 <span aria-hidden="true">↗</span>'; $('loadingTitle').textContent = '提交结果未确认'; $('loadingDescription').textContent = '可用同一提示词和设置重试；不会重新创建任务。'; $('previewLoading').classList.add('is-paused'); stopElapsed(); setNotice(error.message, true); }
 }
 function makeRecent(item) {
@@ -231,7 +293,7 @@ async function applyKey() {
       $('copyKeyButton').disabled = false;
       $('keyNotice').textContent = '已自动连接，可以直接生成视频。';
       $('keyNotice').classList.remove('error');
-      loadHistory(); const draft = activeDraft(); if (draft?.taskId) queryTask(draft.taskId, { manual: true });
+      loadHistory(); const target = linkedTask() || activeDraft()?.taskId; if (target) queryTask(target, { manual: true });
       return true;
     } catch (error) {
       apiKey = ''; $('apiKey').value = '';

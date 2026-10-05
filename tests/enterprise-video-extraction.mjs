@@ -32,3 +32,15 @@ test('does not treat unfinished cards or generic files as videos', () => {
   ] }] };
   assert.deepEqual(extractRunVideos(snapshot), []);
 });
+
+test('falls back to Doubao short video links in assistant text only', () => {
+  const link = 'https://aka.doubaocdn.com/s/nLUiTQI1ka';
+  const text = (user_type, value) => ({ message_id: '123456789012', user_type, content_block: [
+    { block_type: 10000, block_id: 'text', content: { text_block: { text: value } } }] });
+  const reply = text(2, `已交付的视频：\n- **链接**：${link}\n再次：${link}\n伪造：https://aka.doubaocdn.com.evil.example/s/abcdEF https://evil.example/s/abcdEF`);
+  const videos = extractRunVideos({ nodes: [], messages: [text(1, 'https://aka.doubaocdn.com/s/userAAAA'), reply] });
+  assert.deepEqual(videos.map(video => [video.kind, video.source, video.creationId]), [['link', link, 'nLUiTQI1ka']]);
+  const structured = { block_type: 10020, block_id: 'file', content: { file_block: { type: 'mp4', name: 'a.mp4', url: 'https://p6-flow-sign.byteimg.com/x' } } };
+  reply.content_block.push(structured);
+  assert.deepEqual(extractRunVideos({ nodes: [], messages: [reply] }).map(video => video.kind), ['file']);
+});

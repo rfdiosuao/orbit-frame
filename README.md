@@ -28,6 +28,10 @@ npm start
 - 提示词、1–15 秒时长、横屏 16:9 / 竖屏 9:16 / 方形 1:1，另支持 4:3 / 3:4。
 - 默认请求 Seedance 2.0 Fast，输出 MP4。实际执行模型 ID 尚未独立核验，模型名表示请求值。
 - 真实任务状态、刷新恢复、幂等提交、白名单视频确认自动继续、成片提取与 MP4 校验。
+- 后台 watcher 通过一条复用的 CDP 连接推进任务；状态查询只读本地（毫秒级），页面经 SSE 接收进度并显示「已提交 → 豆包生成中 → 等待确认 → 提取视频 → 文件校验 → 可预览」。
+- 图生视频（`image_to_video`）与首尾帧（`first_last_frame`），参考图限定在媒体目录内。
+- 豆包只在回复文字中给出 `aka.doubaocdn.com` 短链时，也能下载并校验成片。
+- 本地 stdio MCP 服务，Agent 用结构化参数生成视频，不接触 API Key。
 - Bearer 认证的作品列表和文件接口；预览使用 Blob URL。
 - 天空 / 深空主题、Logo 与加载动画、手机布局及减少动态效果支持。
 - 保留原有文生图入口和高级账号、Cookie、日志管理。
@@ -50,6 +54,47 @@ npm run --silent video:desktop -- download <video-id> ./output.mp4
 ```
 
 密钥从本地 `.env` 读取，CLI 不打印密钥。查询时继续使用原任务 ID；同一 `--key` 只能用于相同请求。
+
+## 任务状态与 SSE
+
+- `GET /v1/videos/tasks/:task_id`：只读本地状态；`?wait_seconds=N` 等待状态变化；`?refresh=1` 让暂停的任务（`unknown` / `waiting_input` / `extraction_failed` / `video_missing`）立即重查一次豆包。
+- `GET /v1/videos/tasks/:task_id/events`：SSE 状态流，同样需要 Bearer，任务停止运行后自动关闭。
+- 响应中的 `phase`：`submitted` → `generating` → `awaiting_confirmation` → `extracting` → `validating` → `ready`。
+- 页面支持 `/?task=<task_id>` 直接打开某个任务。
+
+## 图生视频与首尾帧
+
+```json
+{
+  "provider": "doubao-desktop",
+  "mode": "first_last_frame",
+  "prompt": "镜头从室内平滑过渡到海边",
+  "duration": 6,
+  "ratio": "16:9",
+  "first_frame": { "path": "first.png" },
+  "last_frame": { "path": "last.png" }
+}
+```
+
+- `mode`：`text_to_video`（默认）、`image_to_video`（需要 `first_frame`）、`first_last_frame`（需要 `first_frame` 和 `last_frame`）。
+- 图片必须位于 `ORBIT_FRAME_MEDIA_DIR`（默认 `data/media`），相对路径按该目录解析，符号链接逃逸会被拒绝。
+- 按内容识别 PNG / JPEG / WebP；单张不超过 20 MB，每边 300–6000 像素，宽高比 2:5–5:2。比例与 `ratio` 不符时在 `warnings` 中提示。
+- 网关把校验过的字节复制为 `first_frame.*` / `last_frame.*`，按顺序作为附件上传，并在提示中写明首帧、尾帧角色。
+- 成片只以文字短链给出时，只从助手消息提取，下载后核对时长（±1.5 秒）与画面比例。
+
+短链提取已用一次真实首尾帧探测任务验证：1280×720、5.04 秒 MP4，FFmpeg 完整解码通过。经网关完整提交图生视频 / 首尾帧任务尚未单独验收；页面还没有首帧 / 尾帧上传区。
+
+## Agent / MCP
+
+`scripts/orbit-frame-mcp.mjs` 是本地 stdio MCP 服务，自行读取 `LOCAL_API_KEY`，不会把密钥交给 Agent。工具：
+
+- `generate_and_wait`：`prompt`、`model`、`duration`、`ratio`、`mode`、`first_frame`、`last_frame`、`wait`、`timeout_seconds`、`idempotency_key`；返回 `task_id`、本地 MP4 路径和预览地址。超时后用 `get_video_status` 继续，不要重新提交。
+- `get_video_status`：查询状态，可等待最多 60 秒。
+- `download_video`：只写入 `ORBIT_FRAME_OUTPUT_DIR`（默认 `data/exports`），只接受文件名。
+
+```bash
+doubao mcp register orbit-frame --command "$(command -v node)" --arg "$PWD/scripts/orbit-frame-mcp.mjs"
+```
 
 ## 来源与许可
 
