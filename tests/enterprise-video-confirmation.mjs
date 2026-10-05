@@ -26,3 +26,11 @@ test('does not expand confirmation beyond the exact single video ask', () => {
     assert.equal(isEligibleVideoConfirmationAsk({ ...exactAsk, questions: [{ ...exactAsk.questions[0], ...change }] }), false);
   }
 });
+
+const choiceAsk = {status:1,clarify_id:'choice-ask',questions:[{question_id:'confirm_generate_video',type:1,title:'是否按以上参数开始生成这段 5 秒、16:9 的视频？',options:[{label:'按要求生成',option_id:'go'},{label:'暂不生成',option_id:'cancel'}],question_capability:{allow_text:true}}]};
+test('accepts the actual video generation choice while rejecting ambiguous or paid asks',()=>{
+ assert.equal(isEligibleVideoConfirmationAsk(choiceAsk),true);
+ for (const change of [{title:'是否支付费用后生成视频？'},{options:[{label:'按要求生成',option_id:'go'},{label:'立即生成',option_id:'go2'}]},{options:[{label:'暂不生成',option_id:'cancel'}]},{options:[{label:'按要求生成',description:'支付后生成',option_id:'go'}]}]){
+  assert.equal(isEligibleVideoConfirmationAsk({...choiceAsk,questions:[{...choiceAsk.questions[0],...change}]}),false);
+ }
+});

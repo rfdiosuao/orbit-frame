@@ -197,14 +197,23 @@ export async function inspectEnterpriseRun(conversationId, runId) {
   }));
 }
 
+export function videoConfirmationOption(question) {
+  const choices = (question?.options || []).filter(option =>
+    typeof option.option_id === 'string' && option.option_id &&
+    /^(按要求生成|立即生成|开始生成|确认生成|生成视频|继续生成|生成|继续)$/.test(String(option.label || '').trim()) &&
+    !/支付|付费|收费|充值|购买|扣费/.test(`${option.label || ''} ${option.description || ''}`));
+  return choices.length === 1 ? choices[0].option_id : null;
+}
+
 export function isEligibleVideoConfirmationAsk(ask, answeredIds = []) {
   const question = ask?.questions?.[0];
-  return ask?.status === 1 && !answeredIds.includes(ask.clarify_id) &&
-    ask.questions?.length === 1 &&
-    ['confirm_video_gen', 'confirm_video_generate', 'confirm_video_generation', 'final_generation_confirm'].includes(question.question_id) &&
-    question.type === 3 && question.question_capability?.allow_text === true &&
-    /确认|是否/.test(question.title || '') && /生成/.test(question.title || '') &&
-    /视频|参数/.test(question.title || '');
+  if (!question) return false;
+  if (!(ask?.status === 1 && !answeredIds.includes(ask.clarify_id) && ask.questions?.length === 1 &&
+      ['confirm_video_gen', 'confirm_video_generate', 'confirm_video_generation', 'final_generation_confirm', 'confirm_generate_video'].includes(question.question_id) &&
+      /确认|是否/.test(question.title || '') && /生成/.test(question.title || '') && /视频|参数/.test(question.title || '') &&
+      !/支付|付费|收费|充值|购买|费用|扣费/.test(question.title || ''))) return false;
+  return question.type === 3 && question.question_capability?.allow_text === true ||
+    question.type === 1 && videoConfirmationOption(question) !== null;
 }
 
 export async function confirmEnterpriseVideoAsk(conversationId, runId, options = {}, answeredIds = [], beforeSubmit = async () => {}) {
@@ -224,7 +233,8 @@ export async function confirmEnterpriseVideoAsk(conversationId, runId, options =
     const ratio = options.ratio || '16:9';
     const reply = `确认，仅按本次已授权参数生成1条 ${model}、${duration}秒、${ratio} 视频。立即提交并等待可播放视频。`;
     const answered = { ...ask, status: 2, questions: [{ ...q, answer: {
-      status: 2, selected_option_ids: [], capability_answer: { text: reply }, question_id: q.question_id,
+      status: 2, selected_option_ids: q.type === 1 ? [videoConfirmationOption(q)] : [],
+      ...(q.question_capability?.allow_text === true ? { capability_answer: { text: reply } } : {}), question_id: q.question_id,
     } }] };
     await beforeSubmit(ask.clarify_id);
     const result = await client.evaluate(`(async () => {
