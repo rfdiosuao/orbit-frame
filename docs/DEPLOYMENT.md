@@ -25,7 +25,7 @@ npx playwright install chromium
 
 ```dotenv
 PORT=8787
-LOCAL_API_KEY=replace-with-your-random-key
+# LOCAL_API_KEY 由启动程序自动生成，无需填写
 UPSTREAM_URL=http://127.0.0.1:8000
 BROWSER_PROFILE_DIR=data/browser-profile
 LOG_DIR=data/logs
@@ -87,7 +87,7 @@ npm run --silent video:desktop -- status <task-id> --wait-seconds 45
 npm run --silent video:desktop -- download <video-id> ./fox.mp4
 ```
 
-用实际返回值替换 `<task-id>` 和 `<video-id>`。`--async` 返回任务后即可退出；后续查询推动恢复、参数确认和提取。未加 `--async` 会等待一段时间，但超时不等于失败，继续查询原任务。CLI 输出 JSON，可由其他程序解析。下载不覆盖已存在文件。
+用实际返回值替换 `<task-id>` 和 `<video-id>`。`--async` 返回任务后即可退出；网关后台监控程序负责后续查询、参数确认、下载和校验。状态接口读取本地记录，不会每次重新调用豆包。未加 `--async` 会等待一段时间，但超时不等于失败，继续查询原任务。CLI 输出 JSON，可由其他程序解析。下载不覆盖已存在文件。
 
 退出码：0 表示请求成功（异步提交可能仍 running）；1 表示失败、取消或未取得视频；2 表示需要输入、未知状态或提取未完成。必须检查 JSON 的 `status` 和 `videos`，不能以退出码 0 当成成片。
 
@@ -113,7 +113,9 @@ Authorization: Bearer YOUR_LOCAL_API_KEY
 | --- | --- |
 | `GET /health` | 本地服务存活；不代表账户登录或视频权限 |
 | `GET /v1/videos/tasks` | 受保护的真实任务列表 |
-| `GET /v1/videos/tasks/:id?wait_seconds=45` | 查询、续跑原任务，等待最长 60 秒 |
+| `GET /v1/videos/tasks/:id?wait_seconds=45` | 读取本地状态，等待状态变化，最长 60 秒 |
+| `GET /v1/videos/tasks/:id?refresh=1` | 对暂停的任务立即重新查询一次豆包 |
+| `GET /v1/videos/tasks/:id/events` | SSE 实时状态流，需要 Bearer 请求头 |
 | `GET /v1/videos/files/:id` | 下载 MP4，支持 Range |
 | `POST /v1/videos/recover` | 按 `conversation_id` / `run_id` 恢复 |
 
@@ -124,9 +126,9 @@ Authorization: Bearer YOUR_LOCAL_API_KEY
 - **401**：核对 `.env` 和页面密钥；改 `.env` 后重启。
 - **客户端未登录 / 发消息退出**：先手动确认客户端认证恢复，网关无法修复过期的账户登录。
 - **waiting_input**：明确的视频生成确认会自动选择「按要求生成」并继续；如果是付费、取消或其他输入，客户端中处理后查询原任务，无需重新生成。
-- **unknown**：原任务结果尚未确认，继续同一 ID 或恢复原 run；避免换幂等键重复发送。
+- **unknown**：原任务结果尚未确认，使用原任务 ID 加 `?refresh=1` 重新查询，或恢复原 run；避免换幂等键重复发送。
 - **extraction_failed / video_missing**：任务结束但未取得有效 MP4，查看客户端原会话并重新查询。
-- **页面刷新**：原任务 ID 和幂等键保留；没勾记住密钥需再连接。
+- **页面刷新**：原任务 ID 和幂等键保留，页面自动重新取得本机密钥并恢复连接，无需手工填写。
 - **内嵌浏览器下载无反应**：使用普通浏览器，或上述 CLI 下载命令。内嵌浏览器下载落盘尚未独立验收。
 - **图像生成**：采用旧网页上游登录，企业客户端视频登录不等于网页图像登录；通过「连接设置 → 打开高级管理」完成相应网页登录。
 
@@ -134,7 +136,7 @@ Authorization: Bearer YOUR_LOCAL_API_KEY
 
 ```bash
 node --check public/app.js
-node --test tests/enterprise-video-confirmation.mjs tests/enterprise-video-extraction.mjs tests/video-response-regression.mjs tests/video-library-safety.mjs
+npm test
 ```
 
 作品库安全测试会在临时端口启动测试网关，并读取本机任务元数据；不会生成视频。自动测试不能替代你的账户下实际生成、预览和下载验收。
@@ -142,7 +144,7 @@ node --test tests/enterprise-video-confirmation.mjs tests/enterprise-video-extra
 
 ## 10. API Key 与网站 API 的关系
 
-`LOCAL_API_KEY` 是你自己为本机网关设置的访问密码，并非豆包账号密钥、Cookie、GitHub Key 或官方云端 API Key。豆包生成权限来自已登录客户端账户；两个环节缺一不可。
+`LOCAL_API_KEY` 是本机网关自动生成的访问密码，允许保留你自己的自定义值；它并非豆包账号密钥、Cookie、GitHub Key 或官方云端 API Key。豆包生成权限来自已登录客户端账户；两个环节缺一不可。
 
 - 已部署用户：本机 `.env` 已有 `LOCAL_API_KEY`，可以继续使用；`npm run api:key -- --copy` 只复制到 macOS 剪贴板，不在终端显示。
 - 新部署用户：启动网关时自动生成并保存随机密钥，无需填写。
@@ -156,3 +158,73 @@ node --test tests/enterprise-video-confirmation.mjs tests/enterprise-video-extra
 
 
 本机自动连接入口仅接受回环地址、正确 localhost/127.0.0.1 主机名及同源 JSON POST 请求，拒绝外部来源与 DNS 重绑定请求；响应禁止缓存。密钥只在当前页面内存中使用，不再保存到 localStorage。视频 HTTP API 继续要求 Bearer Key。
+
+## 11. 后台监控与进度
+
+异步请求立即返回 `task_id`。后台监控程序通过共享 CDP 连接推进原任务，按等待时间调整查询间隔；网关重启后会接管仍在运行的任务。页面优先使用携带 Bearer 请求头的 SSE，连接失败时才回退到本地状态轮询。
+
+`phase` 的顺序为 `submitted` → `generating` → `awaiting_confirmation` → `extracting` → `validating` → `ready`。这些值表示实际处理阶段，不是预计完成百分比。可用 `http://127.0.0.1:8787/?task=<task-id>` 直接打开某个任务的预览。
+
+短暂的 CDP 读取失败会重试；连续三次失败后任务暂停为 `unknown`。处理客户端登录或连接问题后，在页面重新查询，或请求原任务的 `?refresh=1`，无需创建新任务。
+
+## 12. 图生视频与首尾帧 API
+
+将自己选择的图片放入项目的 `data/media` 目录（不存在时先创建）。可通过 `ORBIT_FRAME_MEDIA_DIR` 指定其他媒体目录。路径只能指向该目录内的文件，符号链接不能跳出该目录。
+
+| `mode` | 必需参数 | 含义 |
+| --- | --- | --- |
+| `text_to_video` | `prompt` | 文生视频，默认模式 |
+| `image_to_video` | `prompt`、`first_frame.path` | 用一张图片作为首帧 |
+| `first_last_frame` | `prompt`、`first_frame.path`、`last_frame.path` | 明确指定首帧与尾帧 |
+
+下面的首尾帧请求可发送到 `POST /v1/videos/generations`，同样需要 Bearer 请求头。图生视频时将 `mode` 改为 `image_to_video` 并删除 `last_frame`。
+
+```json
+{
+  "provider": "doubao-desktop",
+  "model": "Seedance 2.0 Fast",
+  "mode": "first_last_frame",
+  "prompt": "镜头从室内平滑过渡到海边",
+  "duration": 5,
+  "ratio": "16:9",
+  "first_frame": { "path": "first.png" },
+  "last_frame": { "path": "last.png" },
+  "idempotency_key": "room-to-sea-001",
+  "async": true
+}
+```
+
+文件按实际内容识别 PNG、JPEG 或 WebP；每张不超过 20 MB，每边 300–6000 像素，宽高比 2:5–5:2。画面比例不匹配时，响应的 `warnings` 会提示可能裁切或补边。网关保存校验过的图片副本、首尾帧角色和内容哈希，然后按角色顺序作为客户端附件提交。
+
+接口和 MCP 已接入这两种模式；首页尚未提供图片上传控件，现有项目 CLI 也未提供帧参数。真实首尾帧探测任务已生成可解码 MP4，文本短链提取已验证；图生视频和首尾帧经网关完整提交的链路仍需另行验收。
+
+## 13. Agent / MCP 接入
+
+先启动网关，再在 MCP 客户端配置本地 stdio 服务。使用 doubao-cli 注册时，在项目目录运行：
+
+```bash
+npx doubao mcp register orbit-frame --command "$(command -v node)" --arg "$PWD/scripts/orbit-frame-mcp.mjs"
+```
+
+其他支持 stdio 的 Agent 可使用以下配置，将脚本路径替换为本机项目的绝对路径。服务会按脚本所在项目读取 `.env`，无需把密钥写入 Agent 配置。
+
+```json
+{
+  "mcpServers": {
+    "orbit-frame": {
+      "command": "node",
+      "args": ["/absolute/path/orbit-frame/scripts/orbit-frame-mcp.mjs"]
+    }
+  }
+}
+```
+
+| 工具 | 用途 |
+| --- | --- |
+| `generate_and_wait` | 提交并等待有效 MP4，返回任务、文件路径和预览地址；支持三种生成模式 |
+| `get_video_status` | 读取原任务状态，可等待最长 60 秒 |
+| `download_video` | 将已完成任务的视频复制到导出目录，只接受纯文件名且不覆盖已有文件 |
+
+可对 Agent 说：“使用 orbit-frame 的 generate_and_wait，生成 5 秒、16:9 的海边纸船视频，模型 Seedance 2.0 Fast。等待完成后返回预览地址，再用 download_video 保存为 paper-boat.mp4。”
+
+首尾帧工具参数与上面的 API 请求一致，但不用传 `provider` 或 `async`；工具默认等待，超时后用返回的 `task_id` 调用 `get_video_status`，不要再次提交。默认导出目录为项目的 `data/exports`，可用绝对路径的 `ORBIT_FRAME_OUTPUT_DIR` 覆盖。`npm run mcp` 可启动服务；Agent 配置直接调用 `node` 脚本，避免 npm 的额外输出干扰 JSON-RPC。

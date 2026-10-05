@@ -93,7 +93,7 @@ npm run --silent video:desktop -- download <video-id> ./output.mp4
 - `download_video`：只写入 `ORBIT_FRAME_OUTPUT_DIR`（默认 `data/exports`），只接受文件名。
 
 ```bash
-doubao mcp register orbit-frame --command "$(command -v node)" --arg "$PWD/scripts/orbit-frame-mcp.mjs"
+npx doubao mcp register orbit-frame --command "$(command -v node)" --arg "$PWD/scripts/orbit-frame-mcp.mjs"
 ```
 
 ## 来源与许可

@@ -1,8 +1,19 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
+import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { createApp } from '../src/gateway.js';
 import { config } from '../src/config.js';
 const originalFetch = globalThis.fetch;
+const originalSessionFile = config.sessionFile;
+const originalCdp = process.env.DOUBAO_USE_CDP;
+const sessionDir = await mkdtemp(path.join(os.tmpdir(), 'orbit-response-test-'));
+// This regression uses a mocked provider, so it must not depend on a real
+// login record or connect to a user's CDP browser on a fresh checkout.
+config.sessionFile = path.join(sessionDir, 'session.json');
+process.env.DOUBAO_USE_CDP = '0';
+await writeFile(config.sessionFile, JSON.stringify({ sessionId: 'f'.repeat(32), source: 'test' }), { mode: 0o600 });
 let scenario = 'quota';
 let upstreamCalls = 0;
 globalThis.fetch = async (url, options) => {
@@ -33,6 +44,10 @@ try {
  assert.equal(upstreamCalls, 2, 'No automatic retries or paid confirmation');
 } finally {
  globalThis.fetch = originalFetch;
+ config.sessionFile = originalSessionFile;
+ if (originalCdp === undefined) delete process.env.DOUBAO_USE_CDP;
+ else process.env.DOUBAO_USE_CDP = originalCdp;
  server.close();
  server.closeAllConnections();
+ await rm(sessionDir, { recursive: true, force: true });
 }
