@@ -447,6 +447,14 @@ export function createApp() {
     return res.json({ api_key: config.localApiKey, project_dir: config.root, media_dir: config.mediaDir });
   });
 
+  // An open page may outlive a gateway restart. Renew its media-only cookie
+  // using the existing API credential before native range-based playback.
+  app.post('/api/media-access', requireLocalKey, (_req, res) => {
+    res.set('Cache-Control', 'no-store');
+    res.cookie('orbit_media', mediaToken, { httpOnly: true, sameSite: 'strict', path: '/v1' });
+    return res.json({ ok: true });
+  });
+
   app.get("/health", (_req, res) => {
     res.json({ ok: true, service: "doubao-relay", pid: process.pid,
       started_at: new Date(Date.now() - process.uptime() * 1000).toISOString(),

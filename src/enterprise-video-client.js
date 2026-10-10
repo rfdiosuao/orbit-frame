@@ -250,6 +250,7 @@ async function downloadMp4(rawUrl, file) {
       status = await new Promise((resolve, reject) => {
         const child = spawn('/usr/bin/curl', [
           '--silent', '--show-error', '--max-time', '90', '--max-filesize', String(maxBytes),
+          '--connect-timeout', '15', '--retry', '2', '--retry-delay', '1', '--retry-max-time', '120',
           '--dump-header', headerFile, '--output', tempFile, '--write-out', '%{http_code}',
           '--config', '-',
         ], { stdio: ['pipe', 'pipe', 'pipe'], env: process.env });
@@ -310,6 +311,8 @@ export async function inspectEnterpriseRun(conversationId, runId, { confirmedIds
     return { status: snapshot.result.status, pending: snapshot.result.pending || [],
       videos: extractRunVideos(mediaSnapshot), reference_failure: extractReferenceFailure(mediaSnapshot),
       message: snapshot.result.progress || snapshot.result.reply?.text || '',
+      generationObserved: Boolean(snapshot.result.tasks?.total || snapshot.messages?.flatMap(messageBlocks)
+        .some(block => /^(?:text_to_video|image_to_video|video_generation)$/.test(block.content?.generic_tool_block?.tool_name || ''))),
       textConfirmation: !deliveryRunId ? textVideoConfirmation(snapshot, confirmationOptions, messageBlocks) : null };
   }));
 }

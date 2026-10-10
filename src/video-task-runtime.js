@@ -116,6 +116,12 @@ export function createVideoTaskStepper({ inspect, confirm, extraction, save, can
       .filter(item => !item.clarifyId || !job.confirmedIds.includes(item.clarifyId));
     if (state.textConfirmation) { state.status = 'waiting_input'; job.pending.push({kind:'text_confirmation', clarifyId:state.textConfirmation.id, messageId:state.textConfirmation.messageId}); }
     if (state.status === 'completed') {
+      if (state.generationObserved === false && !state.videos?.length) {
+        job.status = 'waiting_input'; job.phase = 'awaiting_confirmation';
+        job.pending = [{kind:'text_review'}];
+        job.message = '豆包本轮只返回了文字，尚未发现视频生成任务或文件。请查看豆包回复并确认后继续查询原任务。';
+        return save(job);
+      }
       job.status = 'running'; job.phase = 'extracting';
       await save(job);
       extraction.add(job.id, state); // Media work never holds up another task's CDP observation.

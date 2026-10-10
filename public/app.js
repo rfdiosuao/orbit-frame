@@ -171,8 +171,9 @@ async function loadVideo(video) {
   const source = `/v1/videos/files/${encodeURIComponent(video.id)}`;
   if (currentBlobUrl === source) return;
   clearVideo();
-  // local-access has already established the HttpOnly media cookie. Native
-  // playback requests ranges instead of buffering the entire MP4 in memory.
+  // Renew a media cookie that may have expired during a gateway restart.
+  // Native playback still requests ranges instead of buffering the whole MP4.
+  await api('/api/media-access', { method: 'POST' });
   currentBlobUrl = source;
   $('videoPlayer').preload = 'metadata';
   $('videoPlayer').src = source;

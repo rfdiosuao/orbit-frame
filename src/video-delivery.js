@@ -4,37 +4,74 @@ import path from 'node:path';
 const shortLink = /https:\/\/aka\.doubaocdn\.com\/s\/[A-Za-z0-9_-]{4,64}(?![A-Za-z0-9_\/-])/g;
 const maxBytes = 100 * 1024 * 1024;
 
+function recordedPath(file, cwd = null) {
+  if (!file || /[\r\n`$\0]/.test(file)) return null;
+  // Keep ~ symbolic: two recorded ~/ paths can match without guessing HOME.
+  if (file.startsWith('~/')) return '~/' + path.posix.normalize(file.slice(2));
+  if (!file.startsWith('/') && cwd?.startsWith('~/')) return '~/' + path.posix.normalize(path.posix.join(cwd.slice(2),file));
+  return file.startsWith('/') || cwd ? path.posix.resolve(cwd || '/', file) : null;
+}
+
 // Read literal paths from recorded tool output. Never execute its commands.
 function fileArgument(command, flag, cwd = null) {
   const match = new RegExp(`(?:^|\\s)${flag}\\s+(?:"([^"]+)"|'([^']+)'|([^\\s;&|<>]+))`).exec(command);
   const file = match && (match[1] || match[2] || match[3]);
-  if(!file || !/\.mp4$/i.test(file) || /[\r\n`$\0]/.test(file) || !file.startsWith('/') && !cwd)return null;
-  return path.posix.resolve(cwd || '/',file);
+  return /\.mp4$/i.test(file || '') ? recordedPath(file, cwd) : null;
+}
+
+// Recent clients flatten tool records instead of exposing display_content.
+// Parse the explicit command / exit code / result boundary, not prose claims.
+function operationDisplay(operation) {
+  if (operation?.display_content) return operation.display_content;
+  if (operation?.operation_type !== 1 || typeof operation.content !== 'string') return null;
+  const match = /^([^\r\n]+)\r?\n\r?\nExit code (-?\d+)(?:\r?\n\r?\n([\s\S]*))?$/.exec(operation.content.trim());
+  return match ? { operation: match[1], exit_code: Number(match[2]), result: match[3] || '' } : null;
+}
+
+function sameFileCheck(command, file, cwd) {
+  const match = /^(?:ls\s+-(?:lh|la|l)|file)\s+(?:"([^"]+)"|'([^']+)'|([^\s]+))$/.exec(command);
+  return match && recordedPath(match[1] || match[2] || match[3], cwd) === file;
+}
+
+function copiedFile(commands) {
+  if (!commands) return null;
+  const parts = [...commands.parts];
+  if (/^mkdir -p (?:"[^"\r\n]+"|'[^'\r\n]+'|[^\s]+)$/.test(parts[0])) parts.shift();
+  const match = /^cp\s+("[^"]+"|'[^']+'|[^\s]+)\s+("[^"]+"|'[^']+'|[^\s]+)$/.exec(parts.shift() || '');
+  if (!match) return null;
+  const unquote = value => /^['"]/.test(value) ? value.slice(1,-1) : value;
+  const source = recordedPath(unquote(match[1]), commands.cwd), destination = recordedPath(unquote(match[2]), commands.cwd);
+  if (!source || !destination || !/\.mp4$/i.test(destination) || !parts.every(part => sameFileCheck(part, destination, commands.cwd))) return null;
+  return {source, destination};
 }
 
 // Recognize only a literal optional cwd and read-only checks after curl.
 // These strings are evidence; none are evaluated or executed.
 function recordedCommands(raw) {
-  if(typeof raw!=='string' || /[\r\n`$;|<>\0]/.test(raw))return null;
+  if(typeof raw!=='string')return null;
+  // Shell wrappers emitted by the client are read-only; no command is executed.
+  raw=raw.trim().replace(/^pwd\s*;\s*echo\s+["']---["']\s*;\s*/, '').replace(/\s+2>&1$/, '');
+  if(/[\r\n`$;|<>\0]/.test(raw))return null;
   const parts=raw.replace(/\\"/g,'"').trim().split(/\s+&&\s+/);let cwd=null;
   if(/^cd\s/.test(parts[0])) {
     const match=/^cd\s+(?:"([^"]+)"|'([^']+)'|([^\s]+))$/.exec(parts.shift());
     cwd=match && (match[1] || match[2] || match[3]);
-    if(!cwd?.startsWith('/') || /[&]/.test(cwd))return null;
-    cwd=path.posix.normalize(cwd);
+    if(!cwd || /[&]/.test(cwd))return null;
+    cwd=recordedPath(cwd);if(!cwd)return null;
   }
+  if(/^mkdir -p (?:"[^"\r\n]+"|'[^'\r\n]+'|[^\s]+)$/.test(parts[0])) parts.shift();
   if(!parts.length || parts.length>3)return null;
   return {parts,cwd};
 }
 
 function cloudUpload(operation) {
-  const display = operation?.display_content;
+  const display = operationDisplay(operation);
   const commands=recordedCommands(display?.operation);
   if (!display || Number(display.exit_code) !== 0 || !commands || commands.parts.length!==1 || !/^lark-cli\s+drive\s+\+upload\s/.test(commands.parts[0])) return null;
   const file = fileArgument(commands.parts[0], '--file',commands.cwd);
   if (!file) return null;
   let result;
-  try { result = typeof display.result === 'string' ? JSON.parse(display.result) : display.result; } catch { return null; }
+  try { result = typeof display.result === 'string' ? JSON.parse(display.result.replace(/\r?\nThe workspace directory is [^\r\n]+$/, '')) : display.result; } catch { return null; }
   const data = result?.data, bytes = Number(data?.size);
   if (result?.ok !== true || !/\.mp4$/i.test(data?.file_name || '') || !Number.isSafeInteger(bytes) || bytes < 32 || bytes > maxBytes) return null;
   try {
@@ -62,21 +99,23 @@ export function extractCloudVideos(entries) {
       }
     }
     if (Number(block.block_type) !== 10019) continue;
-    const operation = block.content?.file_operation_block, display = operation?.display_content;
+    const operation = block.content?.file_operation_block, display = operationDisplay(operation);
     if (!display || Number(display.exit_code) !== 0) continue;
     const commands=recordedCommands(display.operation);
     if (commands && /^(?:\/usr\/bin\/)?curl\s/.test(commands.parts[0])) {
       // Do not accept a compound command that could transform the downloaded file.
       const {parts,cwd}=commands;
       const file = fileArgument(parts[0], '(?:-o|--output)',cwd);
-      const checks=parts.slice(1).every(part=>{
-        const match=/^(?:ls\s+-(?:lh|la|l)|file)\s+(?:"([^"]+)"|'([^']+)'|([^\s]+))$/.exec(part);
-        const arg=match && (match[1] || match[2] || match[3]);
-        return arg && path.posix.resolve(cwd || '/',arg)===file;
-      });
+      const checks=parts.slice(1).every(part=>sameFileCheck(part,file,cwd));
       if(!checks)continue;
       const links = [...parts[0].matchAll(shortLink)].map(match => match[0]);
       if (file && links.length === 1) downloads.set(`${group}:${file}`, { source: links[0], messageId, blockId: String(block.block_id) });
+    }
+    const copy = copiedFile(commands);
+    if (copy) {
+      const original = downloads.get(`${group}:${copy.source}`);
+      if (original) downloads.set(`${group}:${copy.destination}`, original);
+      else downloads.delete(`${group}:${copy.destination}`);
     }
     const upload = cloudUpload(operation);
     if (!upload) continue;

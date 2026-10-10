@@ -1,0 +1,35 @@
+{
+  "confirmationText": "根据 Seedance 2.5 Skill 的规范，生成前需要与你确认以下信息：\n\n---\n\n**生成前确认**\n\n- **模型**：`seedance_2.5`（固定，不切换）\n- **任务类型**：文生视频\n- **原始 prompt**（逐字透传，不做任何润色/扩写）：\n  ```\n  dog\n  ```\n- **时长**：5 秒（用户指定，在 5–30 秒范围内）\n- **比例**：16:9（用户指定，在支持列表内）\n- **参考素材**：无\n- **检索补充**：未触发全局检索规则（无\"豆包\"形象、无时效热点词），故为\"无\"\n- **后续动作**：生成完成后，将视频上传至豆包云盘（飞书云空间），并把附件链接交付给你\n\n---\n\n是否按以上信息使用 Seedance 2.5 生成这段 5 秒、16:9 的视频？请回复\"确认\"或指出需要调整的项。",
+  "blocks": [
+    {
+      "block_type": 10019,
+      "block_id": "record-0",
+      "content": {
+        "file_operation_block": {
+          "operation_type": 1,
+          "content": "curl -L -o /home/user/.doubao/agent_mode/workspace/dog_seedance.mp4 \"https://aka.doubaocdn.com/s/fixture_video\" && ls -lh /home/user/.doubao/agent_mode/workspace/dog_seedance.mp4\n\nExit code 0\n\n  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current\n                                 Dload  Upload   Total   Spent    Left  Speed\n\r  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0\r100     2  100     2    0     0      8      0 --:--:-- --:--:-- --:--:--     8\r100     2  100     2    0     0      8      0 --:--:-- --:--:-- --:--:--     8\n\r100  681k  100  681k    0     0   754k      0 --:--:-- --:--:-- --:--:--  754k\n-rw-r--r-- 1 user user 682K Oct 10 22:40 /home/user/.doubao/agent_mode/workspace/dog_seedance.mp4"
+        }
+      }
+    },
+    {
+      "block_type": 10019,
+      "block_id": "record-1",
+      "content": {
+        "file_operation_block": {
+          "operation_type": 1,
+          "content": "mkdir -p ~/files && cp /home/user/.doubao/agent_mode/workspace/dog_seedance.mp4 ~/files/dog_seedance2.5_5s_9x16.mp4 && ls -lh ~/files/dog_seedance2.5_5s_9x16.mp4\n\nExit code 0\n\n-rw-r--r-- 1 user user 682K Oct 10 22:40 /home/user/files/dog_seedance2.5_5s_9x16.mp4"
+        }
+      }
+    },
+    {
+      "block_type": 10019,
+      "block_id": "record-2",
+      "content": {
+        "file_operation_block": {
+          "operation_type": 1,
+          "content": "lark-cli drive +upload --file ~/files/dog_seedance2.5_5s_9x16.mp4 --format json\n\nExit code 0\n\n{\n  \"ok\": true,\n  \"identity\": \"user\",\n  \"data\": {\n    \"file_name\": \"dog_seedance2.5_5s_9x16.mp4\",\n    \"file_token\": \"test_token\",\n    \"size\": 697573,\n    \"url\": \"https://example.feishu.cn/file/test_token\",\n    \"version\": \"7695049119336778957\"\n  }\n}"
+        }
+      }
+    }
+  ]
+}

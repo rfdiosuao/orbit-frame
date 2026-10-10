@@ -16,5 +16,16 @@ test('local page receives key; external and rebinding requests are denied', asyn
   }
   assert.notEqual((await fetch(base+'/api/local-access')).status,200);
   assert.equal((await fetch(base+'/v1/videos/tasks')).status,401);
+  const stale='orbit_media='+'0'.repeat(64);
+  const denied=await fetch(base+'/api/media-access',{method:'POST',headers:{Cookie:stale}});
+  assert.equal(denied.status,401);assert.equal(denied.headers.get('set-cookie'),null);
+  const renewed=await fetch(base+'/api/media-access',{method:'POST',headers:{Authorization:`Bearer ${config.localApiKey}`,Cookie:stale}});
+  assert.equal(renewed.status,200);assert.equal(renewed.headers.get('cache-control'),'no-store');
+  const cookie=renewed.headers.get('set-cookie');
+  assert.match(cookie,/orbit_media=[0-9a-f]{64}.*HttpOnly.*SameSite=Strict/i);
+  const pair=cookie.split(';')[0];assert.notEqual(pair,stale);
+  // A renewed cookie opens only media routes, never the task API.
+  assert.equal((await fetch(base+'/v1/videos/files/'+'0'.repeat(32),{headers:{Cookie:pair}})).status,404);
+  assert.equal((await fetch(base+'/v1/videos/tasks',{headers:{Cookie:pair}})).status,401);
  }finally{server.close();server.closeAllConnections();}
 });
