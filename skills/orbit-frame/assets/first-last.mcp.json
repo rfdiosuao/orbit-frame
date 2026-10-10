@@ -1,0 +1,11 @@
+{
+  "prompt": "严格使用两张原图，从首帧平滑过渡到尾帧，保持人物、服装与构图",
+  "first_frame_path": "/ABSOLUTE/PATH/TO/first.png",
+  "last_frame_path": "/ABSOLUTE/PATH/TO/last.png",
+  "model": "Seedance 2.5",
+  "duration": 5,
+  "ratio": "9:16",
+  "mode": "first_last_frame",
+  "wait": true,
+  "timeout_seconds": 900
+}

@@ -21,9 +21,21 @@ import {
 } from "./session-store.js";
 import { loginAndCaptureSession } from "./login-browser.js";
 import { generateVideo } from "./video-client.js";
-import { enterpriseVideoFile } from "./enterprise-video-client.js";
+import { enterpriseVideoFile, enterpriseVideoSource } from "./enterprise-video-client.js";
+import { getVideoReadiness } from './video-readiness.js';
+import { followsVideoTask } from '../public/video-task-state.js';
+import { storeUploadedFrame, readUploadedFrame } from './video-frame-upload.js';
+import { listCanvases, createCanvas, getCanvas, saveCanvas, deleteCanvas } from './canvas-store.js';
+import { canvasSceneSummary, composeVideoScene, reserveVideoScene, releaseRejectedScene } from './canvas-scenes.js';
+import { saveGeneratedImages, readMediaImage, listMediaImages } from './image-save.js';
+import { generateEnterpriseImage } from './enterprise-image-client.js';
+import { startImageJob, getImageJob, resumeImageJobs, cancelImageJob, imageJobReferencePolicy } from './image-jobs.js';
+import { generateCompatibleImage, imageCapabilities, saveImageProviderSettings } from './image-providers.js';
+import { randomBytes } from 'node:crypto';
+import { videoSubmissionPolicy } from './video-submission.js';
+import { videoAttachmentUploadPolicy } from './video-attachment-upload.js';
 import { startEnterpriseVideoJob, getEnterpriseVideoJob, recoverEnterpriseVideoJob, listEnterpriseVideoJobs,
-  refreshEnterpriseVideoJob, jobEvents } from "./enterprise-video-jobs.js";
+  refreshEnterpriseVideoJob, cancelEnterpriseVideoJob, jobEvents } from "./enterprise-video-jobs.js";
 import { generateImage, RateLimitError } from "./image-client.js";
 import {
   probeCdp,
@@ -107,6 +119,15 @@ function requireLocalKey(req, res, next) {
   return next();
 }
 
+// Read-only media cookie for <img>/<video> on the local pages. It is not the
+// API key, changes on every gateway start and only opens media GET routes.
+const mediaToken = randomBytes(32).toString('hex');
+function requireMediaAccess(req, res, next) {
+  const cookie = /(?:^|;\s*)orbit_media=([0-9a-f]{64})(?:;|$)/.exec(req.get('cookie') || '')?.[1];
+  if (cookie === mediaToken) return next();
+  return requireLocalKey(req, res, next);
+}
+
 function enterpriseVideoResponse(job, prompt = "") {
   const videos = (job.videos || []).map(video => ({
     ...video, video_url: `http://127.0.0.1:${config.port}${video.url}`,
@@ -119,6 +140,12 @@ function enterpriseVideoResponse(job, prompt = "") {
     mode: job.mode, frames: job.frames, warnings: job.warnings,
     created_at: job.created_at, updated_at: job.updated_at,
     requested_model: job.requested_model, model_verification: job.model_verification,
+    cancellation:job.cancellation || null,
+    failure_history: job.failure_history || [], recovery_history: job.recovery_history || [],
+    submission_diagnostic: job.submission_diagnostic || null, submission_receipt: job.submission_receipt || null,
+    error: job.error || null, next_action: job.next_action || null,
+    last_checked_at: job.last_checked_at || null, phase_started_at: job.phase_started_at || null,
+    timings_ms: job.timings_ms || {}, observed_phases: job.observed_phases || [], delivery: job.delivery || null,
     data: videos.map(video => ({ url: video.video_url, revised_prompt: prompt || undefined })),
     videos, pending: job.pending, message: job.message,
     task_url: `/v1/videos/tasks/${job.id}`,
@@ -413,11 +440,16 @@ export function createApp() {
         !req.is('application/json') || fetchSite && fetchSite !== 'same-origin') {
       return res.status(403).json({ error: { type: 'local_page_only', message: '仅本机网关页面可自动连接。' } });
     }
-    return res.json({ api_key: config.localApiKey });
+    // Paths let the settings page build agent instructions for this machine.
+    res.cookie('orbit_media', mediaToken, { httpOnly: true, sameSite: 'strict', path: '/v1' });
+    return res.json({ api_key: config.localApiKey, project_dir: config.root, media_dir: config.mediaDir });
   });
 
   app.get("/health", (_req, res) => {
-    res.json({ ok: true, service: "doubao-relay" });
+    res.json({ ok: true, service: "doubao-relay", pid: process.pid,
+      started_at: new Date(Date.now() - process.uptime() * 1000).toISOString(),
+      image_job_reference_policy: imageJobReferencePolicy, video_submission_policy: videoSubmissionPolicy,
+      video_attachment_upload_policy: videoAttachmentUploadPolicy });
   });
 
   app.get("/admin/status", async (_req, res) => {
@@ -647,7 +679,19 @@ export function createApp() {
         images: result.images?.length || 0,
         account: maskSession(account.sessionId),
       });
+      // save: true keeps local copies, since Doubao's signed image links expire.
+      let saved;
+      if (body.save === true) {
+        try {
+          saved = (await saveGeneratedImages(result.images)).map(image => ({ path: image.media_path,
+            preview_url: `/v1/media/generated/${path.basename(image.file)}`, width: image.width, height: image.height }));
+        } catch (error) {
+          logger.warn("image save failed", { message: String(error.message || error) });
+          saved = [];
+        }
+      }
       return res.json({
+        ...(saved ? { saved } : {}),
         created: Math.floor(Date.now() / 1000),
         id: account.id,
         model: result.model || body.model || "doubao",
@@ -708,8 +752,12 @@ export function createApp() {
           const result = enterpriseVideoResponse(job, body.prompt);
           return res.status(job.status === 'completed' ? 200 : job.status === 'running' || job.status === 'submitting' ? 202 : 200).json(result);
         } catch (error) {
+          if (error.submitted === false) return res.status(error.httpStatus || 503).json({ error: {
+            type: error.code, code: error.code, message: error.message, submitted: false,
+            retryable: true, next_action: error.next_action } });
           const invalid = error.invalid || /prompt|duration|ratio|idempotency_key/.test(String(error.message));
           return res.status(invalid ? 400 : 502).json({ error: {
+            submitted: invalid ? false : 'unknown', retryable: Boolean(invalid),
             type: invalid ? 'invalid_request' : 'enterprise_video_error',
             message: invalid ? String(error.message) : '企业豆包视频任务暂时不可用；可用已返回的任务 ID 继续查询。',
           } });
@@ -810,12 +858,189 @@ export function createApp() {
     }
   };
 
+  // Browser uploads stay in the same private media directory used by CLI/MCP.
+  const parseFrame = express.raw({ type: ['image/png', 'image/jpeg', 'image/webp', 'application/octet-stream'], limit: '20mb' });
+  app.post('/v1/videos/frames', requireLocalKey, (req, res) => {
+    parseFrame(req, res, async error => {
+      res.set('Cache-Control', 'no-store');
+      if (error) return res.status(error.type === 'entity.too.large' ? 413 : 400).json({
+        error: { type: 'invalid_frame', message: error.type === 'entity.too.large' ? '图片不能超过 20 MB' : '图片上传失败，请重试。' } });
+      try { return res.status(201).json(await storeUploadedFrame(req.body)); }
+      catch (error) { return res.status(error.invalid ? 400 : 500).json({ error: {
+        type: 'invalid_frame', message: error.invalid ? error.message : '图片保存失败，请重试。' } }); }
+    });
+  });
+  app.get('/v1/videos/frames/:name', requireMediaAccess, async (req, res) => {
+    try {
+      const frame = await readUploadedFrame(req.params.name);
+      if (!frame) return res.status(404).end();
+      res.set({ 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+      return res.type(frame.type).send(frame.data);
+    } catch { return res.status(500).end(); }
+  });
+
+  app.get('/v1/media/:dir/:name', requireMediaAccess, async (req, res) => {
+    try {
+      const image = await readMediaImage(req.params.dir, req.params.name);
+      if (!image) return res.status(404).end();
+      res.set({ 'Cache-Control': 'private, max-age=3600', 'X-Content-Type-Options': 'nosniff' });
+      return res.type(image.type).send(image.data);
+    } catch { return res.status(500).end(); }
+  });
+
+  // One SSE stream for many video tasks, so a canvas with several running
+  // videos does not exhaust the browser's per-host connection limit.
+  app.get("/v1/videos/events", requireLocalKey, async (req, res) => {
+    const ids = [...new Set(String(req.query.ids || '').split(',').filter(id => /^(?:[0-9a-f-]{36}|[0-9a-f]{64})$/.test(id)))].slice(0, 50);
+    if (!ids.length) return res.status(400).json({ error: { type: 'invalid_request', message: 'ids 不能为空' } });
+    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive' });
+    req.setTimeout?.(0);
+    const sent = new Map();
+    let closed = false, checking = false;
+    const send = current => {
+      if (closed) return;
+      const state = JSON.stringify([current.status, current.phase, current.error, current.videos, current.pending, current.message]);
+      if (sent.get(current.id) === state) return;
+      sent.set(current.id, state);
+      res.write(`event: status\ndata: ${JSON.stringify(enterpriseVideoResponse(current))}\n\n`);
+    };
+    for (const id of ids) jobEvents.on(id, send);
+    const heartbeat = setInterval(async () => {
+      if (closed || checking) return;
+      checking = true;
+      try {
+        res.write(': keep-alive\n\n');
+        // Catch changes written by the watcher in another gateway process.
+        for (const id of ids) { const current = await getEnterpriseVideoJob(id).catch(() => null); if (current) send(current); }
+      } finally { checking = false; }
+    }, 15_000);
+    req.on('close', () => { closed = true; clearInterval(heartbeat); for (const id of ids) jobEvents.off(id, send); });
+    for (const id of ids) {
+      const job = await getEnterpriseVideoJob(id).catch(() => null);
+      if (job) send(job);
+      else send({ id, status: 'failed', phase: null, created_at: new Date().toISOString(),
+        message: '任务记录不存在，无法读取这张视频卡片。', error: { code: 'task_not_found' }, videos: [] });
+    }
+  });
+
+  const generateImageJob = (body, options) => body.provider === 'doubao-desktop'
+    ? generateEnterpriseImage(body, options) : body.provider === 'openai-compatible' ? generateCompatibleImage(body,options) : runImageWithFailover(body).then(r => r.result);
+  resumeImageJobs(generateImageJob).catch(() => {});
+
+  // Background image jobs: the canvas keeps the job id, so a reload resumes waiting.
+  app.post('/v1/images/jobs', requireLocalKey, async (req, res) => {
+    try {
+      const job = await startImageJob(req.body || {}, generateImageJob);
+      return res.status(202).json(job);
+    } catch (error) {
+      return res.status(error.invalid ? 400 : 500).json({ error: { type: 'image_job_error', message: error.invalid ? error.message : '图片任务创建失败。',submitted:error.invalid ? false : 'unknown' } });
+    }
+  });
+  app.get('/v1/images/jobs/:id', requireLocalKey, async (req, res) => {
+    try {
+      const job = await getImageJob(req.params.id, { waitMs: Math.min(60, Math.max(0, Number(req.query.wait_seconds) || 0)) * 1000, refresh: req.query.refresh === '1' });
+      return job ? res.status(job.status === 'running' ? 202 : 200).json(job)
+        : res.status(404).json({ error: { type: 'image_job_not_found', message: '图片任务不存在' } });
+    } catch { return res.status(500).json({ error: { type: 'image_job_error', message: '图片任务查询失败。' } }); }
+  });
+  app.get('/v1/media', requireLocalKey, async (req, res) => {
+    try { return res.json({ images: await listMediaImages(String(req.query.dir || 'generated'), Number(req.query.limit) || 60) }); }
+    catch { return res.status(500).json({ error: { type: 'media_error', message: '素材读取失败。' } }); }
+  });
+  app.get('/v1/images/capabilities',requireLocalKey,async(req,res)=>{
+    try {res.json(await imageCapabilities({probe:req.query.probe==='1'}));}catch {res.status(500).json({error:{message:'生图配置暂时不可读'}});}
+  });
+  app.post('/v1/images/provider',requireLocalKey,async(req,res)=>{
+    try {res.json(await saveImageProviderSettings(req.body || {}));}catch(error) {res.status(error.invalid?400:500).json({error:{message:error.invalid?error.message:'生图配置保存失败',submitted:false}});}
+  });
+  app.post('/v1/images/jobs/:id/cancel',requireLocalKey,async(req,res)=>{
+    try {const job=await cancelImageJob(req.params.id);res.status(job?200:404).json(job || {error:{message:'图片任务不存在',submitted:false}});}catch {res.status(502).json({error:{message:'取消结果未知，请查询原任务',submitted:'unknown'}});}
+  });
+  app.post('/v1/videos/tasks/:id/cancel',requireLocalKey,async(req,res)=>{
+    try {const job=await cancelEnterpriseVideoJob(req.params.id);res.status(job?200:404).json(job ? enterpriseVideoResponse(job) : {error:{message:'视频任务不存在',submitted:false}});}catch {res.status(502).json({error:{message:'取消结果未知，请查询原任务',submitted:'unknown'}});}
+  });
+
+  app.get('/v1/canvases', requireLocalKey, async (_req, res) => {
+    try { return res.json({ canvases: await listCanvases() }); }
+    catch { return res.status(500).json({ error: { type: 'canvas_error', message: '暂时无法读取画布列表。' } }); }
+  });
+  app.post('/v1/canvases', requireLocalKey, async (req, res) => {
+    try { return res.status(201).json(await createCanvas(req.body || {})); }
+    catch (error) { return res.status(error.invalid ? 400 : 500).json({ error: { type: 'canvas_error', message: error.invalid ? error.message : '画布创建失败。' } }); }
+  });
+  app.get('/v1/canvases/:id', requireLocalKey, async (req, res) => {
+    try {
+      const doc = await getCanvas(req.params.id);
+      return doc ? res.json(doc) : res.status(404).json({ error: { type: 'canvas_not_found', message: '画布不存在' } });
+    } catch { return res.status(500).json({ error: { type: 'canvas_error', message: '画布读取失败。' } }); }
+  });
+  app.get('/v1/canvases/:id/video-scenes', requireLocalKey, async (req, res) => {
+    try {
+      const doc = await getCanvas(req.params.id);
+      return doc ? res.json(canvasSceneSummary(doc)) : res.status(404).json({ error: { type: 'canvas_not_found', message: '画布不存在' } });
+    } catch { return res.status(500).json({ error: { type: 'canvas_error', message: '画布读取失败。' } }); }
+  });
+  app.post('/v1/canvases/:id/video-scenes', requireLocalKey, async (req, res) => {
+    try {
+      const result = await composeVideoScene(req.params.id, req.body || {});
+      return result ? res.status(201).json(result) : res.status(404).json({ error: { type: 'canvas_not_found', message: '画布不存在' } });
+    } catch (error) { return res.status(error.invalid ? 400 : 500).json({ error: { type: 'canvas_error', message: error.invalid ? error.message : '镜头保存失败。', submitted: false } }); }
+  });
+  app.post('/v1/canvases/:id/video-scenes/:cardId/generate', requireLocalKey, async (req, res) => {
+    let input;
+    try {
+      const doc = await getCanvas(req.params.id);
+      if (!doc) return res.status(404).json({ error: { type: 'canvas_not_found', message: '画布不存在', submitted: false } });
+      const card = doc.cards.find(c => c.id === req.params.cardId && c.type === 'video');
+      if (card?.task_id) {
+        const existing = await getEnterpriseVideoJob(card.task_id);
+        if (existing) return res.json(enterpriseVideoResponse(existing));
+        if (!card.request_key) return res.status(409).json({ error: { type: 'task_missing', message: '原任务暂时不可读，请查询原编号；不要重新生成。', submitted: 'unknown', task_id: card.task_id } });
+      }
+      input = await reserveVideoScene(req.params.id, req.params.cardId);
+      if (!input) return res.status(404).json({ error: { type: 'canvas_not_found', message: '画布不存在', submitted: false } });
+      const job = await startEnterpriseVideoJob({ ...input, provider: 'doubao-desktop', async: true,
+        first_frame: input.first_frame || undefined, last_frame: input.last_frame || undefined });
+      return res.status(job.status === 'completed' ? 200 : 202).json(enterpriseVideoResponse(job));
+    } catch (error) {
+      const rejected = error.invalid || error.submitted === false;
+      if (rejected && input) await releaseRejectedScene(req.params.id, req.params.cardId, input.idempotency_key).catch(() => {});
+      return res.status(rejected ? (error.httpStatus || 400) : 502).json({ error: {
+        type: error.code || 'canvas_video_error', message: rejected ? error.message : '任务结果暂时无法确认，请查询原任务编号。',
+        submitted: rejected ? false : 'unknown', ...(input ? { task_id: input.task_id } : {}) } });
+    }
+  });
+  app.delete('/v1/canvases/:id', requireLocalKey, async (req, res) => {
+    try { return (await deleteCanvas(req.params.id)) ? res.status(204).end() : res.status(404).json({ error: { type: 'canvas_not_found', message: '画布不存在' } }); }
+    catch { return res.status(500).json({ error: { type: 'canvas_error', message: '画布删除失败。' } }); }
+  });
+  app.put('/v1/canvases/:id', requireLocalKey, async (req, res) => {
+    try {
+      const doc = await saveCanvas(req.params.id, req.body || {});
+      return doc ? res.json(doc) : res.status(404).json({ error: { type: 'canvas_not_found', message: '画布不存在' } });
+    } catch (error) {
+      if (error.conflict) return res.status(409).json({ error: { type: 'canvas_conflict', message: '画布已在其他窗口修改。' }, current: error.current });
+      return res.status(error.invalid ? 400 : 500).json({ error: { type: 'canvas_error', message: error.invalid ? error.message : '画布保存失败。' } });
+    }
+  });
+
   app.post("/v1/videos/generations", requireLocalKey, handleVideoGeneration);
   app.post("/v1/videos", requireLocalKey, handleVideoGeneration);
   app.post("/v1/video/generations", requireLocalKey, handleVideoGeneration);
 
-  app.get("/v1/videos/tasks", requireLocalKey, async (_req, res) => {
-    try { return res.json({ tasks: await listEnterpriseVideoJobs() }); }
+  app.get('/v1/videos/readiness', requireLocalKey, async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    return res.json(await getVideoReadiness({ force: req.query.refresh === '1' }));
+  });
+
+  app.get("/v1/videos/tasks", requireLocalKey, async (req, res) => {
+    try {
+      const limit = Math.max(1, Math.min(100, Math.floor(Number(req.query.limit) || 100)));
+      const before = String(req.query.before || '');
+      if (before && !/^(?:[0-9a-f-]{36}|[0-9a-f]{64})$/.test(before)) return res.status(400).json({ error: { message: '分页任务编号无效。' } });
+      const tasks = await listEnterpriseVideoJobs({ limit: limit + 1, before });
+      return res.json({ tasks: tasks.slice(0, limit), next_cursor: tasks.length > limit ? tasks[limit - 1].task_id : null });
+    }
     catch { return res.status(502).json({ error: { type: 'task_list_error', message: '暂时无法读取作品列表。' } }); }
   });
 
@@ -841,12 +1066,25 @@ export function createApp() {
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive' });
     req.setTimeout?.(0);
     const id = job.id;
+    let closed = false, checking = false, sent;
     const send = current => {
+      if (closed) return;
+      const state = JSON.stringify([current.status, current.phase, current.error, current.videos, current.pending, current.message]);
+      if (sent === state) return;
+      sent = state;
       res.write(`event: status\ndata: ${JSON.stringify(enterpriseVideoResponse(current))}\n\n`);
-      if (!['submitting', 'running'].includes(current.status)) close();
+      if (!followsVideoTask(current)) close();
     };
-    const heartbeat = setInterval(() => res.write(': keep-alive\n\n'), 15_000);
-    const close = () => { clearInterval(heartbeat); jobEvents.off(id, send); res.end(); };
+    const heartbeat = setInterval(async () => {
+      if (closed || checking) return;
+      checking = true;
+      try {
+        res.write(': keep-alive\n\n');
+        const current = await getEnterpriseVideoJob(id).catch(() => null);
+        if (current) send(current);
+      } finally { checking = false; }
+    }, 15_000);
+    const close = () => { if (closed) return; closed = true; clearInterval(heartbeat); jobEvents.off(id, send); res.end(); };
     jobEvents.on(id, send);
     req.on('close', close);
     send(job);
@@ -861,7 +1099,14 @@ export function createApp() {
     }
   });
 
-  app.get("/v1/videos/files/:id", requireLocalKey, async (req, res) => {
+  app.get('/v1/videos/files/:id/source', requireLocalKey, async (req, res) => {
+    let source;
+    try { source = await enterpriseVideoSource(req.params.id); } catch { return res.status(502).json({ error: { message: '视频来源读取失败。' } }); }
+    res.set('Cache-Control', 'no-store');
+    return source ? res.json(source) : res.status(409).json({ error: { message: '旧视频尚未核验云盘来源。请重新提取原任务的云盘版本。' } });
+  });
+
+  app.get("/v1/videos/files/:id", requireMediaAccess, async (req, res) => {
     const file = await enterpriseVideoFile(req.params.id);
     if (!file) return res.status(404).end();
     res.type('video/mp4').sendFile(file);

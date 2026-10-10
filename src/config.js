@@ -12,7 +12,7 @@ export const config = {
   root,
   port: Number(process.env.PORT || 8787),
   localApiKey: ensureLocalApiKey(root, process.env.LOCAL_API_KEY),
-  upstreamUrl: (process.env.UPSTREAM_URL || "http://127.0.0.1:8001").replace(/\/$/, ""),
+  upstreamUrl: (process.env.UPSTREAM_URL || "http://127.0.0.1:8000").replace(/\/$/, ""),
   dataDir: path.join(root, "data"),
   // Only images inside this directory may be used as video reference frames.
   mediaDir: path.resolve(root, process.env.ORBIT_FRAME_MEDIA_DIR || "data/media"),

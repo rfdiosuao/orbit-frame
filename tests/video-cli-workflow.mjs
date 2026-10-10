@@ -12,7 +12,8 @@ for (const status of ['completed','waiting_input','failed','running']) test(`CLI
  const server=http.createServer((req,res)=>{
   assert.equal(req.headers.authorization,'Bearer test-only-key');
   if(req.method==='POST'){posts++;res.writeHead(202,{'Content-Type':'application/json'});res.end(JSON.stringify({task_id:'test-task',status:'running'}));}
-  else if(req.url.includes('/tasks/')){queries++;res.setHeader('Content-Type','application/json');res.end(JSON.stringify({task_id:'test-task',status,videos:status==='completed'?[{id:'a'.repeat(64)}]:[]}));}
+  else if(req.url.includes('/tasks/')){queries++;res.setHeader('Content-Type','application/json');res.end(JSON.stringify({task_id:'test-task',status,delivery:{policy:'cloud_only'},videos:status==='completed'?[{id:'a'.repeat(32),source_kind:'cloud_upload_original',source_verification:'matched_upload_path_and_size'}]:[]}));}
+  else if(req.url.endsWith('/source')) {res.setHeader('Content-Type','application/json');res.end(JSON.stringify({source_kind:'cloud_upload_original',source_verification:'matched_upload_path_and_size'}));}
   else {res.setHeader('Content-Type','video/mp4');res.end(bytes);}
  });
  await new Promise(r=>server.listen(0,'127.0.0.1',r));

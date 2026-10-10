@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "orbit-frame": {
+      "type": "stdio",
+      "command": "/ABSOLUTE/PATH/TO/node",
+      "args": [
+        "/ABSOLUTE/PATH/TO/orbit-frame/scripts/orbit.mjs",
+        "--project",
+        "/ABSOLUTE/PATH/TO/orbit-frame-project",
+        "mcp"
+      ]
+    }
+  }
+}

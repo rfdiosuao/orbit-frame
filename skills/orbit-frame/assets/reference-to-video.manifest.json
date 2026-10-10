@@ -1,0 +1,11 @@
+{
+  "project": "外接编辑尾帧后生成视频",
+  "ratio": "9:16",
+  "images": [
+    {"image_id":"first","prompt":"已存在的首帧原图","asset_paths":{"generated_image":"./first.png"}},
+    {"image_id":"last","prompt":"严格参考原图，保持人物服装和构图，只把蓝色窗光改成柔紫色星夜","provider":"openai-compatible","model":"gpt-image-2.5","required_reference_ids":["first"]}
+  ],
+  "shots": [
+    {"shot_id":"transition","prompt":"严格使用首尾原图，蓝色窗光平滑过渡为紫色，保持人物与构图","first_frame_source":"first","last_frame_source":"last","model":"Seedance 2.5","duration":5}
+  ]
+}

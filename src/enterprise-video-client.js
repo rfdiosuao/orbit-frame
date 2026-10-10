@@ -5,11 +5,22 @@ import { lookup } from 'node:dns/promises';
 import net from 'node:net';
 import { spawn } from 'node:child_process';
 import { withApp, resolveApp } from 'doubao-cli/src/app.mjs';
-import { CdpClient, cdpStatus, findChatTarget } from 'doubao-cli/src/cdp.mjs';
-import { createConversation, waitConversation } from 'doubao-cli/src/automation.mjs';
-import { readTurn, messageBlocks, receiptStore } from 'doubao-cli/src/turns.mjs';
+import { CdpClient, cdpStatus, findChatTarget, withChatClient } from 'doubao-cli/src/cdp.mjs';
+import { waitConversation, sendMessage } from 'doubao-cli/src/automation.mjs';
+import { clearUploadedAttachments } from 'doubao-cli/src/attachments.mjs';
+import { resolveTaskContext } from 'doubao-cli/src/context.mjs';
+import { modelProtocol, sendChatCompletion } from 'doubao-cli/src/protocol.mjs';
+import { performVideoSubmission } from './video-submission.js';
+import { uploadVideoAttachments, cleanupVideoUpload, nativeVideoAttachmentBlocks } from './video-attachment-upload.js';
+import { readTurn, refreshTurn, waitTurn, messageBlocks, receiptStore } from 'doubao-cli/src/turns.mjs';
 import { APP_MODULE_BOOTSTRAP } from 'doubao-cli/src/app-modules.mjs';
 import { config } from './config.js';
+import { boundedCdp } from './video-errors.js';
+import { readLiveVideoTurn, acknowledgeLiveConfirmations } from './video-live-turn.js';
+import { extractCloudVideos, selectCloudVideos } from './video-delivery.js';
+import { videoDiagnostic } from './video-errors.js';
+import { validateVideoDuration } from './video-models.js';
+import { extractReferenceFailure } from './reference-failure.js';
 
 const idPattern = /^\d{12,24}$/;
 const mediaHosts = /^(?:(?:[a-z0-9-]+\.)*(?:douyin\.com|douyinvod\.com|byteimg\.com|doubaocdn\.com)|v\d+-vdl\.doubao\.com)$/i;
@@ -41,7 +52,10 @@ async function sharedClient() {
   const status = await cdpStatus();
   if (!status.available) throw new Error(status.error || 'Doubao CDP is unavailable');
   const target = await findChatTarget();
-  const client = await new CdpClient(target.webSocketDebuggerUrl).connect();
+  const client = new CdpClient(target.webSocketDebuggerUrl);
+  await boundedCdp(() => client.connect(), () => client.close());
+  const send = client.send.bind(client);
+  client.send = (method, params) => boundedCdp(() => send(method, params), () => client.close());
   client.socket.addEventListener('close', () => { if (shared === client) shared = null; });
   shared = client;
   return client;
@@ -122,7 +136,11 @@ function videoUrl(video) {
 
 export function extractRunVideos(snapshot) {
   const found = [];
-  for (const message of [...snapshot.messages, ...snapshot.nodes.flatMap(node => node.messages)]) {
+  const messages = [...(snapshot.messages || []), ...(snapshot.nodes || []).flatMap(node => (node.messages || []).map(message => ({ ...message, thread_id: message.thread_id || node.threadId || node.thread_id })))]
+    .filter(message => Number(message.user_type) === 2);
+  const entries = messages.flatMap(message => messageBlocks(message).map(block => ({
+    messageId: String(message.message_id), group: String(message.thread_id || 'main'), block })));
+  for (const message of messages) {
     for (const block of messageBlocks(message)) {
       if (Number(block.block_type) === 10020) {
         const file = block.content?.file_block;
@@ -147,12 +165,9 @@ export function extractRunVideos(snapshot) {
       }
     }
   }
-  if (found.length) return found;
-  // Fallback: short links in assistant text (user_type 2) only, never in user
-  // messages; the MP4 is still probed and checked against the request.
+  // Keep every source category, even when the reply also contains a card.
   const links = new Set();
-  for (const message of [...snapshot.messages, ...snapshot.nodes.flatMap(node => node.messages)]) {
-    if (Number(message.user_type) !== 2) continue;
+  for (const message of messages) {
     for (const block of messageBlocks(message)) {
       if (Number(block.block_type) !== 10000) continue;
       for (const match of String(block.content?.text_block?.text || '').matchAll(shortVideoLink)) {
@@ -164,7 +179,9 @@ export function extractRunVideos(snapshot) {
       }
     }
   }
-  return found;
+  const unique = new Map();
+  for (const video of [...found, ...extractCloudVideos(entries)]) unique.set(video.source, video);
+  return [...unique.values()];
 }
 
 function ratioMatches(width, height, ratio) {
@@ -262,14 +279,36 @@ async function downloadMp4(rawUrl, file) {
   throw new Error('Video exceeded redirect limit');
 }
 
-export async function inspectEnterpriseRun(conversationId, runId) {
+export async function inspectEnterpriseRun(conversationId, runId, { confirmedIds = [], deliveryRunId = null, fresh = false } = {}) {
   validId(conversationId, 'conversation_id');
   validId(runId, 'run_id');
-  return singleFlight(`inspect:${conversationId}:${runId}`, () => withDoubaoClient(async client => {
+  if (deliveryRunId) validId(deliveryRunId, 'delivery_run_id');
+  const inspectedRunId = deliveryRunId || runId;
+  return singleFlight(`inspect:${conversationId}:${inspectedRunId}:${confirmedIds.join(',')}:${fresh}`, () => withDoubaoClient(async client => {
+    if (fresh) {
+      const snapshot = await readTurn(client, conversationId, { runId, receipt: {}, deadline: Date.now() + 25_000 });
+      return { status: snapshot.result.status, pending: snapshot.result.pending || [],
+        videos: extractRunVideos(snapshot), reference_failure: extractReferenceFailure(snapshot),
+        message: snapshot.result.progress || snapshot.result.reply?.text || '' };
+    }
     const receipts = await receiptStore(client);
-    const snapshot = await readTurn(client, conversationId, { runId, receipt: receipts.read(conversationId, runId) });
+    const receipt = receipts.read(conversationId, inspectedRunId);
+    if (acknowledgeLiveConfirmations(receipt, confirmedIds, messageBlocks)) receipts.save(receipt);
+    const snapshot = await readLiveVideoTurn({ conversationId, runId: inspectedRunId, receipt,
+      read: (id, options) => readTurn(client, id, options), wait: (id, options) => waitTurn(client, id, options),
+      refresh: (id, options) => refreshTurn(client, id, { ...options, deadline: Date.now() + 2500, onReceipt: next => receipts.save(next) }),
+      save: next => receipts.save(next), load: id => receipts.read(conversationId, id) });
+    let mediaSnapshot = snapshot;
+    if (deliveryRunId && snapshot.result.status === 'completed') {
+      // The delivery continuation may render only a cloud page. Match its
+      // successful upload against the immutable original run's MP4 attachment.
+      const original = await readTurn(client, conversationId, { runId, receipt: receipts.read(conversationId, runId) });
+      if (original.result.status !== 'completed') throw new Error('Original generation is not complete');
+      mediaSnapshot = { messages: [...original.messages, ...snapshot.messages], nodes: [...original.nodes, ...snapshot.nodes] };
+    }
     return { status: snapshot.result.status, pending: snapshot.result.pending || [],
-      videos: extractRunVideos(snapshot), message: snapshot.result.progress || snapshot.result.reply?.text || '' };
+      videos: extractRunVideos(mediaSnapshot), reference_failure: extractReferenceFailure(mediaSnapshot),
+      message: snapshot.result.progress || snapshot.result.reply?.text || '' };
   }));
 }
 
@@ -285,7 +324,7 @@ export function isEligibleVideoConfirmationAsk(ask, answeredIds = []) {
   const question = ask?.questions?.[0];
   if (!question) return false;
   if (!(ask?.status === 1 && !answeredIds.includes(ask.clarify_id) && ask.questions?.length === 1 &&
-      ['confirm_video_gen', 'confirm_video_generate', 'confirm_video_generation', 'final_generation_confirm', 'confirm_generate_video', 'final_video_confirm'].includes(question.question_id) &&
+      ['confirm_video_gen', 'confirm_video_generate', 'confirm_video_generation', 'final_generation_confirm', 'confirm_generate_video', 'final_video_confirm', 'final_confirm_generate', 'final_generate_confirm', 'final_confirm_first_last_frame', 'confirm_generate', 'final_confirm_seedance25', 'confirm_generate_seedance_25', 'confirm_seedance_25_30s', 'confirm_seedance_gen'].includes(question.question_id) &&
       /确认|是否/.test(question.title || '') && /生成/.test(question.title || '') && /视频|参数/.test(question.title || '') &&
       !/支付|付费|收费|充值|购买|费用|扣费/.test(question.title || ''))) return false;
   return question.type === 3 && question.question_capability?.allow_text === true ||
@@ -308,7 +347,7 @@ export async function confirmEnterpriseVideoAsk(conversationId, runId, options =
     const duration = Number(options.duration || 5);
     const ratio = options.ratio || '16:9';
     const modeText = { image_to_video: '、首帧图生', first_last_frame: '、首尾帧' }[options.mode] || '';
-    const reply = `确认，仅按本次已授权参数生成1条 ${model}、${duration}秒、${ratio}${modeText} 视频。立即提交并等待可播放视频。`;
+    const reply = `确认，仅按本次已授权参数生成1条 ${model}、${duration}秒、${ratio}${modeText} 视频。立即提交并等待可播放视频。生成完后必须将同一原始 MP4 上传到豆包云盘，交付云盘链接并再次交付这个原文件附件；不要重新生成。`;
     const answered = { ...ask, status: 2, questions: [{ ...q, answer: {
       status: 2, selected_option_ids: q.type === 1 ? [videoConfirmationOption(q)] : [],
       ...(q.question_capability?.allow_text === true ? { capability_answer: { text: reply } } : {}), question_id: q.question_id,
@@ -331,17 +370,19 @@ export async function confirmEnterpriseVideoAsk(conversationId, runId, options =
 
 // Pass `state` from a fresh inspectEnterpriseRun() to skip a second CDP read;
 // `onPhase` reports extracting/validating progress to the job store.
-// `expect` ({ duration, ratio }) is enforced for text-link videos, which carry no metadata of their own.
+// Only a source matched to a successful cloud upload can be downloaded.
 export async function recoverEnterpriseVideo(conversationId, runId, { state: known, onPhase = async () => {}, expect = null } = {}) {
   const state = known || await inspectEnterpriseRun(conversationId, runId);
-  if (state.status !== 'completed' || !state.videos.length) {
+  const { selected, delivery } = selectCloudVideos(state.videos);
+  if (state.status !== 'completed' || !selected.length) {
+    const error = state.status === 'completed' ? videoDiagnostic('cloud_video_missing', { submitted: true, retryable: true }) : null;
     return { conversationId, runId, status: state.status === 'completed' ? 'video_missing' : state.status,
-      pending: state.pending, videos: [], message: state.message };
+      pending: state.pending, videos: [], delivery, error, message: error?.message || state.message };
   }
   await fs.mkdir(videoDir, { recursive: true, mode: 0o700 });
   await onPhase('extracting');
   const videos = [];
-  for (const video of state.videos) {
+  for (const video of selected) {
     const id = createHash('sha256').update([conversationId, runId, video.messageId, video.creationId, video.vid].join(':')).digest('hex').slice(0, 32);
     const file = path.join(videoDir, `${id}.mp4`);
     let downloaded;
@@ -359,40 +400,66 @@ export async function recoverEnterpriseVideo(conversationId, runId, { state: kno
     if (video.width && (probe.width !== video.width || probe.height !== video.height || Math.abs(probe.duration - video.duration) > 1)) {
       throw new Error('Downloaded MP4 does not match the video block');
     }
-    if (video.kind === 'link' && expect?.duration && (Math.abs(probe.duration - expect.duration) > 1.5 ||
+    if (expect?.duration && (Math.abs(probe.duration - expect.duration) > 1.5 ||
       expect.ratio && !ratioMatches(probe.width, probe.height, expect.ratio))) {
-      throw new Error('Linked MP4 does not match the requested duration or ratio');
+      throw new Error('Cloud MP4 does not match the requested duration or ratio');
     }
     videos.push({ id, file, url: `/v1/videos/files/${id}`, width: probe.width,
       height: probe.height, duration: probe.duration, bytes: downloaded.bytes,
       sha256: downloaded.sha256, message_id: video.messageId, block_id: video.blockId,
-      creation_id: video.creationId, vid: video.vid });
+      creation_id: video.creationId, vid: video.vid, source_kind: video.kind,
+      source_verification: video.sourceVerification });
+    await fs.writeFile(path.join(videoDir, `${id}.source.json`), JSON.stringify({
+      id, source_kind: video.kind, source_verification: video.sourceVerification,
+      bytes: downloaded.bytes, sha256: downloaded.sha256 }), { mode: 0o600 });
   }
-  return { conversationId, runId, status: 'completed', videos, message: state.message };
+  return { conversationId, runId, status: 'completed', videos, delivery, message: state.message };
 }
 
 const frameInstruction = {
-  image_to_video: '附件图片（first_frame）是视频首帧，请以它为第一帧做图生视频。',
-  first_last_frame: '这是首尾帧视频：第一个附件（first_frame）是首帧，第二个附件（last_frame）是尾帧，请用首尾帧模式生成。',
+  image_to_video: '附件图片（first_frame）是视频首帧，请以它为第一帧做图生视频。必须使用附件原图；若无法读取附件，请停止并明确说明，不能根据文字重绘图片来替代。',
+  first_last_frame: '这是首尾帧视频：第一个附件（first_frame）是首帧，第二个附件（last_frame）是尾帧，请用首尾帧模式生成。必须使用两张附件原图；若无法读取附件，请停止并明确说明，不能根据文字重绘图片来替代。',
 };
 
 // `attachments` are local image paths in role order (first_frame, then last_frame).
-export async function submitEnterpriseVideo(prompt, options = {}, attachments = []) {
+export async function submitEnterpriseVideo(prompt, options = {}, attachments = [], hooks = {}) {
   const model = options.model || 'Seedance 2.0 Fast';
   const duration = Number(options.duration || 5);
   const ratio = options.ratio || '16:9';
-  if (!Number.isInteger(duration) || duration < 1 || duration > 15) throw new Error('duration must be 1 to 15 seconds');
+  validateVideoDuration(model, duration);
   if (!/^\d{1,2}:\d{1,2}$/.test(ratio)) throw new Error('ratio must be like 16:9');
   const mode = options.mode || 'text_to_video';
   const roles = { text_to_video: 0, image_to_video: 1, first_last_frame: 2 }[mode];
   if (roles === undefined || attachments.length !== roles) throw new Error('attachments do not match the video mode');
-  const instruction = `请调用 ${model} 生成一个${duration}秒、${ratio}的视频。${frameInstruction[mode] || ''}画面要求：${prompt}`;
-  const result = await cdpExclusive(() => createConversation(instruction, {
-    runtime: 'cloud', project: 'none', waitForReply: false, timeoutMs: 120_000,
-    ...(attachments.length ? { attachments } : {}),
+  const instruction = `请调用 ${model} 生成一个${duration}秒、${ratio}的视频。${frameInstruction[mode] || ''}画面要求：${prompt}\n生成完后上传到豆包云盘交付附件链接。`;
+  const result = await cdpExclusive(() => withChatClient(async client => {
+    const started = Date.now(), timeoutMs = 120_000;
+    let store;
+    return performVideoSubmission(instruction, attachments, hooks, {
+      upload: paths => uploadVideoAttachments(client, paths, { timeoutMs: 60_000 }),
+      encode: files => nativeVideoAttachmentBlocks(client, files),
+      context: async () => { const resolved = await resolveTaskContext(client, null, { runtime: 'cloud', project: 'none' }); store = await receiptStore(client); return resolved; },
+      storeReceipt: receipt => store.save(receipt),
+      send: (message, resolved, attachmentBlocks, onReceipt) => sendChatCompletion(client, {
+        conversationId: null, message, model: modelProtocol('auto'), waitForReply: false,
+        timeoutMs: Math.max(1, timeoutMs - (Date.now() - started)), ...resolved, attachmentBlocks, onReceipt,
+      }),
+      cleanup: snapshot => clearUploadedAttachments(client, snapshot),
+      cleanupFiles: files => cleanupVideoUpload(client, files),
+    });
   }));
   return { conversationId: result.conversationId, runId: result.runId, status: result.status,
     requestedModel: model, modelVerification: 'requested_only' };
+}
+
+// A single delivery-only continuation reuses the existing conversation/video.
+// The job persists intent before calling this mutation; lost ACKs are not retried.
+export async function requestEnterpriseCloudDelivery(conversationId) {
+  validId(conversationId, 'conversation_id');
+  const receipt = await cdpExclusive(() => sendMessage(conversationId,
+    '上一次视频已经生成成功。这次只补交付：把本会话刚生成的同一个原始 MP4 文件上传到豆包云盘（企业账号可用飞书云盘），返回上传链接，并用 present_files 再次交付刚上传的同一个原始 MP4 附件，供本地网关核对路径和大小。严禁调用视频或图片生成工具，不得重绘、转码、修改或重新生成。如果原文件不存在或上传失败，请明确报错并停止。',
+    { waitForReply: false, timeoutMs: 120_000 }));
+  return { conversationId: receipt.conversationId, runId: receipt.runId };
 }
 
 export async function waitEnterpriseRun(conversationId, runId, timeoutMs = 540_000) {
@@ -405,4 +472,10 @@ export async function enterpriseVideoFile(id) {
   if (!/^(?:[0-9a-f-]{36}|[0-9a-f]{32})$/.test(String(id))) return null;
   const file = path.join(videoDir, `${id}.mp4`);
   try { await fs.access(file); return file; } catch { return null; }
+}
+
+export async function enterpriseVideoSource(id) {
+  if (!/^[0-9a-f]{32}$/.test(String(id))) return null;
+  try { return JSON.parse(await fs.readFile(path.join(videoDir, `${id}.source.json`), 'utf8')); }
+  catch (error) { if (error.code === 'ENOENT') return null; throw error; }
 }

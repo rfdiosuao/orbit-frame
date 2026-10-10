@@ -1,0 +1,90 @@
+{
+  "name": "orbit-frame",
+  "version": "2026-10-10",
+  "created_at": "2026-10-09T17:39:10.040911+00:00",
+  "runtime_required": "Matching complete Orbit Frame project and Node.js >=22.13",
+  "private_credentials_included": false,
+  "validation": {
+    "skill_format": "passed",
+    "offline_self_tests": 4,
+    "real_mcp_tools": 13,
+    "original_task_recovery": "passed",
+    "cloud_download_sha256_match": true,
+    "new_media_generations": 0,
+    "existing_frame_template_preflight": "ready",
+    "external_edit_template_preflight": "valid_dependency_missing_last_until_edit"
+  },
+  "files": [
+    {
+      "file": "SKILL.md",
+      "bytes": 5157,
+      "sha256": "775addb8ac8051793b1e2d77c3a35fcd7e1e85bd68d940e12ce588e4717e6a2b"
+    },
+    {
+      "file": "agents/openai.yaml",
+      "bytes": 303,
+      "sha256": "1f627cd4be994843c34478049e8e83336681af8e0cd3573f5a71a46637b3bbe6"
+    },
+    {
+      "file": "assets/existing-frames.manifest.json",
+      "bytes": 522,
+      "sha256": "13d17181ca760d1830a9c018f8a61fc37e402b7043998696e9ed97b0e41c1b6c"
+    },
+    {
+      "file": "assets/first-last.mcp.json",
+      "bytes": 348,
+      "sha256": "dac6df04e1d21676980d952afa543d939e696175ba59fc55e54dc0cd426e3e53"
+    },
+    {
+      "file": "assets/image-provider.env.example",
+      "bytes": 248,
+      "sha256": "34b29873bf5f8b4164f23178d1a7bb05ee065ee25c5c5abc06ea754140b6747d"
+    },
+    {
+      "file": "assets/mcp.config.example.json",
+      "bytes": 286,
+      "sha256": "ff994bce5d53f6d093b374498e85c47663ac0ef4aa48b2c8d2363290fb95faa5"
+    },
+    {
+      "file": "assets/reference-to-video.manifest.json",
+      "bytes": 652,
+      "sha256": "e0b5d12c61c5219a0e2145911dc79fb06ff055f47bb5e05fa4f095382276c6c5"
+    },
+    {
+      "file": "references/cli.md",
+      "bytes": 6598,
+      "sha256": "a0ff8a1a08f2f7fdb457cd5783b7acad7c81bc325352a45863bdb16fbc83ea69"
+    },
+    {
+      "file": "references/mcp.md",
+      "bytes": 7067,
+      "sha256": "80870a7ab898903ae5ec4ee32a2cd9a9938b31c5286f55c322c3a68f33268d3a"
+    },
+    {
+      "file": "references/operations.md",
+      "bytes": 8456,
+      "sha256": "0438f9c1fec0cc687f5bdffb08084697752344185ed8a131b0208eea42ad4039"
+    },
+    {
+      "file": "references/workflow.md",
+      "bytes": 4595,
+      "sha256": "f3cebf245ac104b37d086bd4c8347bd75c1f21844d83fddefdc3b20f97c83521"
+    },
+    {
+      "file": "scripts/orbit.mjs",
+      "bytes": 7388,
+      "sha256": "32fb6a087a5fe538625d8edddc3e1c5ebc1b567924983d938e7ed14ed4cd0fd7"
+    },
+    {
+      "file": "scripts/self-test.mjs",
+      "bytes": 5410,
+      "sha256": "5c0c978cc5fee3cf0b7c99fab9a6f27bfa94d008a72512df7955fa8f617c92ba"
+    },
+    {
+      "file": "使用说明书.md",
+      "bytes": 5278,
+      "sha256": "2bcb4f49e5c9557b05c3bd1e32934b8e8401c6ff5f0bd9249007420f40825145"
+    }
+  ],
+  "portability_update": "canonical macOS filesystem paths; full deployment guide in project docs/NEW-COMPUTER-MACOS.md"
+}

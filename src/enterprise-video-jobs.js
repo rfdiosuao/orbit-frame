@@ -5,7 +5,18 @@ import { EventEmitter } from 'node:events';
 import { config } from './config.js';
 import { readFrames, frameWarnings, frameSummary } from './video-frames.js';
 import { submitEnterpriseVideo, inspectEnterpriseRun, recoverEnterpriseVideo,
-  confirmEnterpriseVideoAsk, waitEnterpriseRun } from './enterprise-video-client.js';
+  confirmEnterpriseVideoAsk, requestEnterpriseCloudDelivery } from './enterprise-video-client.js';
+import { requireVideoReadiness } from './video-readiness.js';
+import { videoDiagnostic, videoError } from './video-errors.js';
+import { canWatchVideoJob, createExtractionQueue, createVideoTaskStepper, reassessVideoReferenceFailure } from './video-task-runtime.js';
+import { logger } from './logger.js';
+import { createWatcherLease } from './video-watcher-lease.js';
+import { selectCloudVideos } from './video-delivery.js';
+import { continueCloudDeliveryOnce } from './video-cloud-continuation.js';
+import { followsVideoTask } from '../public/video-task-state.js';
+import { validateVideoDuration } from './video-models.js';
+import { cancelEnterpriseRun } from './task-cancellation.js';
+import { safeSubmissionError, persistOriginalVideoReceipt, videoSubmissionPolicy } from './video-submission.js';
 
 const dir = path.join(config.dataDir, 'enterprise-video-jobs');
 const active = new Map();
@@ -22,24 +33,40 @@ function phaseOf(job) {
   return null;
 }
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+const diagnosticFor = job => job.error || (job.status === 'unknown' && !job.runId
+  ? videoDiagnostic('submit_unknown', { submitted: 'unknown', retryable: false }) : null);
 const publicJob = job => ({
   id: job.id, provider: 'doubao-desktop', status: job.status, phase: phaseOf(job),
   conversation_id: job.conversationId || null, run_id: job.runId || null,
   requested_model: job.requestedModel, model_verification: 'requested_only',
-  videos: job.videos || [], pending: (job.pending || []).filter(item => !item.clarifyId || !(job.confirmedIds || []).includes(item.clarifyId)),
+  cancellation:job.cancellation || null,
+  reference_failure:job.reference_failure || null,
+  failure_history: job.failureHistory || [], recovery_history: job.recoveryHistory || [],
+  submission_diagnostic: job.submissionDiagnostic || null, submission_receipt: job.submissionReceipt || null,
+  delivery: job.delivery || null, videos: job.videos || [], pending: (job.pending || []).filter(item => !item.clarifyId || !(job.confirmedIds || []).includes(item.clarifyId)),
   message: job.message || null, created_at: job.createdAt, updated_at: job.updatedAt,
   prompt: job.prompt || null, duration: job.options?.duration || null, ratio: job.options?.ratio || null,
   mode: job.options?.mode || 'text_to_video', frames: job.frames || [], warnings: job.warnings || [],
+  error: diagnosticFor(job), next_action: diagnosticFor(job)?.next_action || null,
+  last_checked_at: job.lastCheckedAt || null, phase_started_at: job.phaseStartedAt || null,
+  timings_ms: job.timings || {}, observed_phases: job.observedPhases || [],
 });
 const fileFor = id => path.join(dir, `${id}.json`);
 
 async function save(job) {
+  const previous = await load(job.id);
+  const phase = phaseOf(job);
+  job.observedPhases ||= [];
+  if (phase && !job.observedPhases.includes(phase)) job.observedPhases.push(phase);
+  const changed = !previous || JSON.stringify([previous.status, phaseOf(previous), previous.error, previous.pending, previous.videos, previous.message, previous.delivery]) !==
+    JSON.stringify([job.status, phaseOf(job), job.error, job.pending, job.videos, job.message, job.delivery]);
+  if (!previous || phaseOf(previous) !== phaseOf(job)) job.phaseStartedAt = new Date().toISOString();
   await fs.mkdir(dir, { recursive: true, mode: 0o700 });
   job.updatedAt = new Date().toISOString();
   const temp = `${fileFor(job.id)}.${randomUUID()}.tmp`;
   await fs.writeFile(temp, JSON.stringify(job), { mode: 0o600 });
   await fs.rename(temp, fileFor(job.id));
-  jobEvents.emit(job.id, publicJob(job));
+  if (changed) jobEvents.emit(job.id, publicJob(job));
 }
 
 async function load(id) {
@@ -89,13 +116,15 @@ async function withFileLock(id, work) {
 }
 
 export async function startEnterpriseVideoJob(body) {
+  const invalid = message => Object.assign(new Error(message), {invalid:true,submitted:false,httpStatus:400,code:'invalid_request'});
   const prompt = String(body.prompt || '').trim();
-  if (!prompt || prompt.length > 20_000) throw new Error('prompt must be 1 to 20000 characters');
+  if (!prompt || prompt.length > 20_000) throw invalid('prompt must be 1 to 20000 characters');
   const requestedModel = String(body.model || 'Seedance 2.0 Fast');
+  if (requestedModel.length > 100) throw invalid('model must be at most 100 characters');
   const duration = Number(body.duration ?? body.seconds ?? 5);
   const ratio = String(body.ratio || body.aspect_ratio || '16:9');
-  if (!Number.isInteger(duration) || duration < 1 || duration > 15) throw new Error('duration must be 1 to 15 seconds');
-  if (!/^\d{1,2}:\d{1,2}$/.test(ratio)) throw new Error('ratio must be like 16:9');
+  try { validateVideoDuration(requestedModel, duration); } catch (error) { throw invalid(error.message); }
+  if (!['16:9', '9:16', '1:1', '4:3', '3:4'].includes(ratio)) throw invalid('ratio must be 16:9, 9:16, 1:1, 4:3 or 3:4');
   const mode = String(body.mode || 'text_to_video');
   const frames = await readFrames(mode, body);
   const options = { model: requestedModel, duration, ratio, ...(frames.length ? { mode } : {}) };
@@ -103,23 +132,24 @@ export async function startEnterpriseVideoJob(body) {
   const fingerprint = createHash('sha256').update(JSON.stringify({ prompt, ...options,
     ...(frames.length ? { frames: frames.map(frame => [frame.role, frame.sha256]) } : {}) })).digest('hex');
   const key = body.idempotency_key ? String(body.idempotency_key) : '';
-  if (key.length > 256) throw new Error('idempotency_key is too long');
+  if (key.length > 256) throw invalid('idempotency_key is too long');
   const id = key ? createHash('sha256').update(`doubao-desktop:${key}`).digest('hex') : randomUUID();
   return serialize(id, async () => {
     const existing = await load(id);
     if (existing) {
-      if (existing.fingerprint !== fingerprint) throw new Error('idempotency_key is already used for a different request');
+      if (existing.fingerprint !== fingerprint) throw invalid('idempotency_key is already used for a different request');
       return publicJob(existing);
     }
     const job = { id, fingerprint, prompt, requestedModel, options, autoConfirm: true, status: 'submitting',
       frames: frames.map(frameSummary), warnings: frameWarnings(frames, ratio),
       videos: [], pending: [], confirmedIds: [], confirmationAttemptedIds: [],
-      initialWaitDone: false, createdAt: new Date().toISOString() };
-    await save(job); // A crash after this point must never silently resend.
+      submissionStarted: false, initialWaitDone: false, createdAt: new Date().toISOString() };
+    // Reject before persisting a task when it is certain no upstream send occurred.
+    await requireVideoReadiness();
+    const attachments = [];
     try {
       // Upload private copies of the validated bytes, named by role, so the
       // source file cannot change between validation and upload.
-      const attachments = [];
       if (frames.length) {
         const jobFrames = path.join(framesDir, id);
         await fs.mkdir(jobFrames, { recursive: true, mode: 0o700 });
@@ -129,48 +159,76 @@ export async function startEnterpriseVideoJob(body) {
           attachments.push(file);
         }
       }
-      const receipt = await submitEnterpriseVideo(prompt, options, attachments);
-      job.conversationId = receipt.conversationId;
-      job.runId = receipt.runId;
+      await save(job); // A crash after this point must never silently resend.
+    } catch { throw videoError('local_storage_error', { submitted: false, retryable: true }); }
+    const started = Date.now();
+    // Persist the mutation boundary before sending. Legacy records without this
+    // field stay uncertain; only an explicit false proves that nothing was sent.
+    job.submissionStarted = true;
+    try { await save(job); }
+    catch { throw videoError('local_storage_error', { submitted: false, retryable: true }); }
+    try {
+      const receipt = await submitEnterpriseVideo(prompt, options, attachments, {
+        onReceipt: receipt => persistOriginalVideoReceipt(job, receipt, save),
+        onPhase: async phase => {
+          job.submissionDiagnostic = { policy: videoSubmissionPolicy, phase, observed_at: new Date().toISOString(),
+            task_id: job.id, prompt_sha256: createHash('sha256').update(prompt).digest('hex'),
+            frame_hashes: job.frames.map(f => ({ role: f.role, sha256: f.sha256 })) };
+          await save(job);
+        },
+      });
+      await persistOriginalVideoReceipt(job, receipt, save);
       job.status = 'running';
     } catch (error) {
-      job.conversationId = error.result?.conversationId || error.conversationId || null;
-      job.runId = error.result?.runId || error.runId || null;
-      job.status = 'unknown';
-      job.message = job.runId ? '提交已被接受；请用会话和 run ID 恢复查询。' : '提交结果未确认；为避免重复生成，未自动重发。';
+      try { await persistOriginalVideoReceipt(job, error.receipt || error.result || error, save); } catch {}
+      job.submissionDiagnostic = safeSubmissionError(error, job);
+      const accepted = Boolean(job.conversationId && job.runId);
+      job.status = accepted ? 'running' : job.submissionDiagnostic.submitted === false ? 'failed' : 'unknown';
+      job.error = videoDiagnostic(accepted ? 'connection_lost' : 'submit_unknown',
+        { submitted: job.submissionDiagnostic.submitted, retryable: false });
+      job.message = job.error.message;
     }
+    job.timings = { submit_ms: Date.now() - started };
     await save(job);
     if (watchable(job)) wakeEnterpriseVideoWatcher();
     return publicJob(job);
   });
 }
 
-export async function listEnterpriseVideoJobs() {
-  let names;
-  try { names = await fs.readdir(dir); }
+let libraryCache = null;
+export async function listEnterpriseVideoJobs({ limit = 100, before = '' } = {}) {
+  let stamp;
+  try { stamp = String((await fs.stat(dir, { bigint: true })).mtimeNs); }
   catch (error) { if (error.code === 'ENOENT') return []; throw error; }
-  const jobs = await Promise.all(names.filter(name => /^(?:[0-9a-f-]{36}|[0-9a-f]{64})\.json$/.test(name))
-    .map(name => load(name.slice(0, -5)).catch(() => null)));
-  return jobs.filter(Boolean).sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')))
-    .slice(0, 100).map(job => ({
+  if (libraryCache?.stamp !== stamp || Date.now() - libraryCache.at > 5000) {
+    const names = await fs.readdir(dir);
+    const jobs = await Promise.all(names.filter(name => /^(?:[0-9a-f-]{36}|[0-9a-f]{64})\.json$/.test(name))
+      .map(name => load(name.slice(0, -5)).catch(() => null)));
+    libraryCache = { stamp, at: Date.now(), jobs: jobs.filter(Boolean).sort((a, b) =>
+      String(b.createdAt || '').localeCompare(String(a.createdAt || '')) || b.id.localeCompare(a.id)) };
+  }
+  const start = before ? libraryCache.jobs.findIndex(job => job.id === before) + 1 : 0;
+  if (before && start === 0) return [];
+  return libraryCache.jobs.slice(start, start + Math.max(1, Math.min(101, Number(limit) || 100))).map(job => ({
       task_id: job.id, status: job.status, prompt: job.prompt ? String(job.prompt).slice(0, 160) : null,
       duration: job.options?.duration || null, ratio: job.options?.ratio || null,
       created_at: job.createdAt || null, updated_at: job.updatedAt || null,
-      videos: (job.videos || []).map(video => ({ id: video.id, width: video.width, height: video.height, duration: video.duration })),
+      delivery: job.delivery || null, videos: (job.videos || []).map(video => ({ id: video.id, width: video.width, height: video.height, duration: video.duration, source_kind: video.source_kind, source_verification: video.source_verification })),
     }));
 }
 
 const isActive = job => ['submitting', 'running'].includes(job.status);
-const watchable = job => job.status === 'running' && job.conversationId && job.runId;
+const watchable = canWatchVideoJob;
 
 export async function getEnterpriseVideoJob(id, { waitMs = 0 } = {}) {
   // Reads local state only; the background watcher talks to Doubao.
   let job = await load(id);
   if (!job) return null;
-  if (watchable(job)) wakeEnterpriseVideoWatcher();
-  if (!waitMs || !isActive(job)) return publicJob(job);
+  // Status GETs cannot reset the watcher's polling backoff.
+  if (watchable(job) && !watcherTimer && !watcherBusy) wakeEnterpriseVideoWatcher();
+  if (!waitMs || !followsVideoTask(job)) return publicJob(job);
   const deadline = Date.now() + Math.max(0, Math.min(waitMs, 540_000));
-  while (isActive(job) && Date.now() < deadline) {
+  while (followsVideoTask(job) && Date.now() < deadline) {
     await new Promise(resolve => {
       const done = () => { clearTimeout(timer); jobEvents.off(id, done); resolve(); };
       const timer = setTimeout(done, Math.min(5000, deadline - Date.now()));
@@ -183,11 +241,19 @@ export async function getEnterpriseVideoJob(id, { waitMs = 0 } = {}) {
 
 // Manual "query again": one immediate Doubao read, also for paused states.
 export async function refreshEnterpriseVideoJob(id) {
-  if (!await load(id)) return null;
+  const current = await load(id);
+  if (!current) return null;
+  if (extraction.has(id)) return publicJob(current);
   return serialize(id, async () => {
     const job = await load(id);
-    if (job.conversationId && job.runId && !terminalStatuses.includes(job.status)) {
+    if (job && (job.status === 'failed' && job.error?.code === 'reference_unreadable' || job.readOnlyRecovery && !terminalStatuses.includes(job.status))) {
+      await reassessVideoReferenceFailure(job, { inspect: inspectEnterpriseRun, extraction, save });
+      return publicJob(job);
+    }
+    if (job.conversationId && job.runId && (!terminalStatuses.includes(job.status) || job.status === 'completed' && job.delivery?.policy !== 'cloud_only')) {
       job.readFailures = 0;
+      job.nextPollAt = null;
+      job.monitorStartedAt = new Date().toISOString();
       await stepJob(job);
       if (watchable(job)) wakeEnterpriseVideoWatcher();
     }
@@ -195,96 +261,94 @@ export async function refreshEnterpriseVideoJob(id) {
   });
 }
 
-async function readFailed(job, message) {
-  job.readFailures = (job.readFailures || 0) + 1;
-  // Transient CDP blips keep the watcher going; repeated failures pause it.
-  if (job.readFailures >= 3) { job.status = 'unknown'; job.message = message; }
-  await save(job);
+export async function cancelEnterpriseVideoJob(id,{cancel=cancelEnterpriseRun}={}) {
+  return serialize(id,async()=>{
+    const job=await load(id);if(!job)return null;
+    if(terminalStatuses.includes(job.status)) {job.cancellation={state:job.status==='completed'?'already_completed':job.status,accepted:false,confirmed:true};await save(job);return publicJob(job);}
+    job.cancellation={state:'requested',accepted:false,confirmed:false,requested_at:new Date().toISOString()};await save(job);
+    if(!job.conversationId || !job.runId) {job.cancellation.state='unknown';await save(job);return publicJob(job);}
+    let result;try {result=await cancel(job.conversationId,job.deliveryRunId || job.runId);}catch {result={state:'unknown',accepted:false,confirmed:false};}
+    job.cancellation={...job.cancellation,...result};
+    if(result.confirmed && result.state==='cancelled') {job.status='cancelled';job.phase=null;job.pending=[];}
+    await save(job);return publicJob(job);
+  });
 }
 
-// One observation of Doubao for a job that has conversation/run IDs.
-async function stepJob(job) {
-  if (!job.initialWaitDone) {
-    try {
-      const first = await waitEnterpriseRun(job.conversationId, job.runId, 8000);
-      job.initialWaitDone = ['waiting_input', 'completed', 'failed', 'cancelled'].includes(first.status);
-    } catch (error) {
-      if (error.code !== 'timeout') return readFailed(job, '无法确认任务状态；可用会话和 run ID 继续查询。');
-    }
-  }
-  let state;
-  try { state = await inspectEnterpriseRun(job.conversationId, job.runId); }
-  catch { return readFailed(job, '暂时无法读取任务状态；请稍后按任务 ID 继续查询。'); }
-  job.readFailures = 0;
-  job.pending = state.pending.map(item => ({ kind: item.kind, messageId: item.messageId,
-    blockId: item.blockId, clarifyId: item.clarifyId,
-    questionIds: item.questions?.map(q => q.question_id) || [] }))
-    .filter(item => !item.clarifyId || !job.confirmedIds.includes(item.clarifyId));
-  if (state.status === 'completed') {
-    job.status = 'running';
+const extraction = createExtractionQueue(async (id, state) => {
+  await serialize(id, async () => {
+    const job = await load(id);
+    if (!job || terminalStatuses.includes(job.status)) return;
+    const started = Date.now();
+    job.delivery = selectCloudVideos(state.videos).delivery;
     try {
       const result = await recoverEnterpriseVideo(job.conversationId, job.runId, { state,
         expect: job.options?.duration ? { duration: job.options.duration, ratio: job.options.ratio } : null,
         onPhase: async phase => { job.phase = phase; await save(job); } });
+      if (await continueCloudDeliveryOnce(job, state, result, { request: requestEnterpriseCloudDelivery, save })) {
+        // Reference reassessment itself was read-only. Once the existing file
+        // has a persisted delivery-only run, monitor that run normally; it
+        // cannot auto-confirm a new generation and the intent prevents resend.
+        if (job.readOnlyRecovery && job.deliveryRunId) { job.readOnlyRecovery = false; await save(job); }
+        if (watchable(job)) wakeEnterpriseVideoWatcher(); return;
+      }
       job.status = result.status;
       job.videos = result.videos.map(({ file, ...video }) => video);
-      job.pending = [];
+      job.pending = []; job.delivery = result.delivery; job.error = result.error || null; job.message = result.error?.message || null;
     } catch {
-      job.status = state.videos.length ? 'extraction_failed' : 'video_missing';
-      job.message = '任务已完成，但视频文件提取或校验失败。';
+      job.status = state.videos?.length ? 'extraction_failed' : 'video_missing';
+      job.error = videoDiagnostic('extraction_failed', { submitted: true, retryable: true });
+      job.message = job.error.message;
     }
-    job.phase = null;
-    return save(job);
-  }
-  if (['failed', 'cancelled'].includes(state.status)) {
-    job.status = state.status;
-    job.message = state.message?.slice(0, 300) || null;
-    return save(job);
-  }
-  if (state.status === 'waiting_input') {
-    job.phase = 'awaiting_confirmation';
-    const attempted = job.confirmationAttemptedIds;
-    const result = job.autoConfirm
-      ? await confirmEnterpriseVideoAsk(job.conversationId, job.runId, job.options, attempted,
-        async clarifyId => { attempted.push(clarifyId); await save(job); })
-      : { confirmed: false };
-    if (result.confirmed) {
-      job.confirmedIds.push(result.clarifyId);
-      job.pending = job.pending.filter(item => !job.confirmedIds.includes(item.clarifyId));
-      job.status = job.pending.length ? 'waiting_input' : 'running';
-    } else if (job.pending.some(item => !item.clarifyId || !job.confirmedIds.includes(item.clarifyId))) {
-      job.status = job.pending.some(item => attempted.includes(item.clarifyId)) ? 'unknown' : 'waiting_input';
-    } else job.status = 'running'; // Only the confirmed ask may remain stale.
-    if (job.status === 'running') job.phase = 'generating';
-  } else {
-    job.status = state.status === 'unknown' ? 'unknown' : 'running';
-    job.phase = 'generating';
-  }
-  return save(job);
-}
+    job.timings ||= {}; job.timings.extract_and_validate_ms = Date.now() - started;
+    job.phase = null; await save(job);
+  });
+}, { onError: (_error, id) => logger.error('video extraction worker failed', { task_id: id }) });
+
+const stepJob = createVideoTaskStepper({ inspect: inspectEnterpriseRun, confirm: confirmEnterpriseVideoAsk, extraction, save, cancel: cancelEnterpriseRun });
 
 let watcherTimer = null;
 let watcherBusy = false;
 let watcherWake = false;
+const claimWatcher = createWatcherLease(dir);
 
 async function watchTick() {
   watcherTimer = null;
   if (watcherBusy) { watcherWake = true; return; }
   watcherBusy = true;
-  let next = 30_000;
+  let next = 5000;
   try {
+    if (!await claimWatcher()) return;
     let names = [];
     try { names = await fs.readdir(dir); } catch (error) { if (error.code !== 'ENOENT') throw error; }
     const jobs = (await Promise.all(names.filter(name => /^(?:[0-9a-f-]{36}|[0-9a-f]{64})\.json$/.test(name))
-      .map(name => load(name.slice(0, -5)).catch(() => null)))).filter(job => job && watchable(job));
+      .map(name => load(name.slice(0, -5)).catch(() => null)))).filter(Boolean);
     for (const candidate of jobs) {
+      if (candidate.status === 'submitting' && !active.has(candidate.id)) {
+        const lock = `${fileFor(candidate.id)}.lock`;
+        const owner = await fs.readFile(path.join(lock, 'owner.json'), 'utf8').then(JSON.parse).catch(() => null);
+        let alive = false;
+        if (owner?.pid) { try { process.kill(owner.pid, 0); alive = true; } catch {} }
+        if (!alive) await serialize(candidate.id, async () => {
+          const job = await load(candidate.id);
+          if (job?.status !== 'submitting') return;
+          const unsent = job.submissionStarted === false;
+          job.status = unsent ? 'failed' : 'unknown';
+          job.error = videoDiagnostic(unsent ? 'local_storage_error' : 'submit_unknown', { submitted: unsent ? false : 'unknown', retryable: unsent });
+          job.message = unsent ? '网关在提交前中断，此请求尚未发送；可重新准备生成。'
+            : '网关在提交期间重启，结果未确认；请在豆包客户端核对，会保留原请求且不会自动重发。';
+          await save(job);
+        });
+        continue;
+      }
+      if (!watchable(candidate) || extraction.has(candidate.id) || candidate.nextPollAt > Date.now()) continue;
       await serialize(candidate.id, async () => {
         const job = await load(candidate.id);
         if (job && watchable(job)) await stepJob(job);
-      }).catch(() => {});
+      }).catch(() => logger.error('video watcher step failed', { task_id: candidate.id }));
     }
-    if (jobs.length) {
-      const youngest = Math.min(...jobs.map(job => Date.now() - new Date(job.createdAt).getTime()));
+    const watching = jobs.filter(watchable);
+    if (watching.length) {
+      const youngest = Math.min(...watching.map(job => Date.now() - new Date(job.createdAt).getTime()));
       next = youngest < 60_000 ? 2000 : youngest < 300_000 ? 5000 : 10_000;
     }
   } catch { /* Keep watching; the next tick retries. */ }

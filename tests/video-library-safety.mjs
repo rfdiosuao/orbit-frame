@@ -13,8 +13,8 @@ try {
   assert.equal(response.status, 200);
   const data = await response.json();
   assert.ok(Array.isArray(data.tasks));
-  const allowed = new Set(['task_id', 'status', 'prompt', 'duration', 'ratio', 'created_at', 'updated_at', 'videos']);
-  const videoAllowed = new Set(['id', 'width', 'height', 'duration']);
+  const allowed = new Set(['task_id', 'status', 'prompt', 'duration', 'ratio', 'created_at', 'updated_at', 'videos', 'delivery']);
+  const videoAllowed = new Set(['id', 'width', 'height', 'duration', 'source_kind', 'source_verification']);
   for (const task of data.tasks) {
     assert.ok(Object.keys(task).every(key => allowed.has(key)), 'Task list contains only UI metadata');
     assert.match(task.task_id, /^(?:[0-9a-f-]{36}|[0-9a-f]{64})$/);

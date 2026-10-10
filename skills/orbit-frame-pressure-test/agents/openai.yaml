@@ -1,0 +1,4 @@
+interface:
+  display_name: "轨映真实压测"
+  short_description: "检查画布上传、首尾帧、CLI 与 MCP 生成及重启恢复的真实完整链路"
+  default_prompt: "使用 $orbit-frame-pressure-test 对轨映做一轮可重复压测，修复问题并交付真实截图和生成文件。"

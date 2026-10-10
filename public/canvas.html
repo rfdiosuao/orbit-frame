@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="zh-CN" data-mode="sky">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#cfe3ff">
+  <title>轨映 · 画布</title>
+  <link rel="icon" type="image/svg+xml" href="/orbit-frame.svg">
+  <link rel="stylesheet" href="/heang/tokens.css">
+  <link rel="stylesheet" href="/canvas.css">
+  <script>try{document.documentElement.dataset.mode=localStorage.getItem('orbit_frame_theme')==='space'?'space':'sky'}catch{}</script>
+</head>
+<body class="canvas-page">
+  <header class="cv-top">
+    <a class="cv-brand" href="/" aria-label="返回轨映首页"><img src="/orbit-frame.svg" alt=""><span><strong>轨映</strong><small>CANVAS</small></span></a>
+    <div class="cv-doc">
+      <input id="canvasTitle" class="cv-title" maxlength="80" aria-label="画布名称" placeholder="未命名画布">
+      <select id="canvasSelect" class="cv-select" aria-label="切换画布"></select>
+      <button id="newCanvas" class="cv-button" type="button">＋ 新画布</button>
+      <button id="syncCanvas" class="cv-button" type="button" title="读取 Agent 或其他窗口保存的镜头">同步镜头</button>
+      <a class="cv-button" href="/image-provider.html" target="_blank">生图服务</a>
+      <button id="deleteCanvas" class="cv-button cv-quiet" type="button" title="删除这张画布（图片、视频和任务会保留）">删除</button>
+      <span id="saveState" class="cv-save" role="status">正在连接…</span>
+    </div>
+    <div class="cv-actions">
+      <div class="cv-zoom" role="group" aria-label="撤销与重做">
+        <button id="undoButton" type="button" title="撤销（⌘Z）" aria-label="撤销" disabled>↶</button>
+        <button id="redoButton" type="button" title="重做（⇧⌘Z）" aria-label="重做" disabled>↷</button>
+      </div>
+      <div class="cv-zoom" role="group" aria-label="缩放">
+        <button id="zoomOut" type="button" aria-label="缩小">−</button>
+        <button id="zoomReset" type="button" aria-label="缩放到 100%">100%</button>
+        <button id="zoomIn" type="button" aria-label="放大">＋</button>
+        <button id="zoomFit" type="button" title="适应画布（⇧1）">适应</button>
+        <button id="minimapToggle" class="active" type="button" title="显示或隐藏小地图" aria-label="小地图">▦</button>
+      </div>
+      <button id="themeToggle" class="cv-button" type="button" aria-label="切换深空主题">☾</button>
+    </div>
+  </header>
+  <aside class="cv-tools" aria-label="添加卡片">
+    <button type="button" data-add="note"><b aria-hidden="true">✎</b><span>添加文字卡</span></button>
+    <button type="button" data-add="image"><b aria-hidden="true">✦</b><span>添加图片卡</span></button>
+    <label class="cv-upload"><input id="uploadInput" type="file" accept="image/png,image/jpeg,image/webp" multiple><b aria-hidden="true">⇪</b><span>上传图片</span></label>
+    <button type="button" data-add="video"><b aria-hidden="true">▶</b><span>添加视频卡</span></button>
+    <hr>
+    <button id="assetsButton" type="button" title="把作品库里的视频和图片放进画布"><b aria-hidden="true">▤</b><span>素材</span></button>
+  </aside>
+  <aside id="drawer" class="cv-drawer" aria-label="素材" hidden>
+    <div class="cv-drawer-head"><strong>素材</strong><button id="closeDrawer" class="cv-close" type="button" aria-label="关闭素材">×</button></div>
+    <div id="assetTabs" class="cv-tabs" role="tablist"></div>
+    <p class="cv-muted">点击放到画布中央，或拖到画布、视频的首帧 / 尾帧。</p>
+    <div id="assetList" class="cv-assets"></div>
+  </aside>
+  <main id="viewport" class="cv-viewport" aria-label="无限画布">
+    <div id="world" class="cv-world">
+      <svg id="edges" class="cv-edges" aria-hidden="true"></svg>
+      <div id="cards"></div>
+    </div>
+    <div id="marquee" class="cv-marquee" hidden></div>
+  </main>
+  <canvas id="minimap" class="cv-minimap" width="200" height="130" aria-label="小地图：点击或拖动跳转"></canvas>
+  <div id="menu" class="cv-menu" role="menu" hidden></div>
+  <dialog id="framePicker" class="cv-frame-picker" aria-labelledby="framePickerTitle">
+    <div class="cv-drawer-head"><strong id="framePickerTitle">选择首帧</strong><button id="closeFramePicker" class="cv-close" type="button" aria-label="关闭图片选择">×</button></div>
+    <p id="framePickerHint" class="cv-muted"></p><div id="framePickerTabs" class="cv-tabs"></div>
+    <label class="cv-frame-upload">＋ 上传图片<input id="frameUploadInput" type="file" accept="image/png,image/jpeg,image/webp"></label>
+    <div id="framePickerList" class="cv-frame-options"></div>
+  </dialog>
+  <input id="directUploadInput" type="file" accept="image/png,image/jpeg,image/webp" hidden>
+  <div id="lightbox" class="cv-lightbox" tabindex="-1" role="dialog" aria-label="图片预览" hidden><img id="lightboxImage" alt=""><p id="lightboxCaption"></p></div>
+  <p class="cv-hint">拖动空白处或按住空格平移 · Shift + 拖动框选 · ⌘ 滚轮缩放 · ⌘Z 撤销 · ⌘C / ⌘V / ⌘D 复制粘贴 · 右键更多</p>
+  <div id="toast" class="cv-toast" role="status" aria-live="polite" hidden></div>
+  <script type="module" src="/canvas.js"></script>
+</body>
+</html>

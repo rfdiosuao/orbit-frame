@@ -1,0 +1,4 @@
+interface:
+  display_name: "轨映 Orbit Frame 全流程"
+  short_description: "用 CLI 或 MCP 上传首尾帧、外接生图、生成与恢复视频任务"
+  default_prompt: "使用 $orbit-frame，根据我的提示词和原图完成生图或首尾帧视频，保存原任务编号并交付视频。"

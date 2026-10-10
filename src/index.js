@@ -7,6 +7,13 @@ import { wakeEnterpriseVideoWatcher } from "./enterprise-video-jobs.js";
 
 const app = createApp();
 
+// When run under start-all, exit if the supervisor dies so an orphaned
+// gateway never keeps :8787 and crash-loops the restarted service.
+const supervisor = process.ppid;
+if (supervisor !== 1) {
+  setInterval(() => { if (process.ppid !== supervisor) process.exit(0); }, 2000).unref();
+}
+
 app.listen(config.port, "127.0.0.1", () => {
   logger.info("gateway listening", {
     url: `http://127.0.0.1:${config.port}`,

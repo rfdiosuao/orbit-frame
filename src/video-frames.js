@@ -14,6 +14,20 @@ export const frameRoles = {
 const maxBytes = 20 * 1024 * 1024;
 const invalid = message => Object.assign(new Error(message), { invalid: true });
 
+export function validateFrameData(data, role = '参考图') {
+  if (!Buffer.isBuffer(data) || !data.length) throw invalid(`${role}：请选择 PNG、JPEG 或 WebP 图片`);
+  if (data.length > maxBytes) throw invalid(`${role}：图片不能超过 20 MB`);
+  const info = imageInfo(data);
+  if (!info) throw invalid(`${role}：仅支持 PNG、JPEG 或 WebP 图片`);
+  if (Math.min(info.width, info.height) < 300 || Math.max(info.width, info.height) > 6000) {
+    throw invalid(`${role}：图片每边需为 300 到 6000 像素`);
+  }
+  if (info.width / info.height < 0.4 || info.width / info.height > 2.5) {
+    throw invalid(`${role}：图片比例需在 2:5 到 5:2 之间`);
+  }
+  return info;
+}
+
 export function imageInfo(data) {
   if (data.length >= 24 && data.readUInt32BE(0) === 0x89504e47 && data.readUInt32BE(4) === 0x0d0a1a0a &&
     data.toString('ascii', 12, 16) === 'IHDR') {
@@ -47,7 +61,7 @@ export function imageInfo(data) {
   return null;
 }
 
-async function readFrame(role, spec) {
+export async function readFrame(role, spec) {
   const raw = typeof spec === 'string' ? spec : spec?.path;
   if (typeof raw !== 'string' || !raw.trim()) throw invalid(`${role}.path is required`);
   const root = await fs.realpath(config.mediaDir).catch(() => null);
@@ -59,11 +73,7 @@ async function readFrame(role, spec) {
   if (!stat.isFile()) throw invalid(`${role} is not a regular file`);
   if (stat.size > maxBytes) throw invalid(`${role} image must be at most 20 MB`);
   const data = await fs.readFile(real);
-  const info = imageInfo(data);
-  if (!info) throw invalid(`${role} must be a PNG, JPEG or WebP image`);
-  const { width, height } = info;
-  if (Math.min(width, height) < 300 || Math.max(width, height) > 6000) throw invalid(`${role} image must be 300 to 6000 pixels per side`);
-  if (width / height < 0.4 || width / height > 2.5) throw invalid(`${role} aspect ratio must be between 2:5 and 5:2`);
+  const info = validateFrameData(data, role);
   return { role, data, ...info, bytes: data.length, sha256: createHash('sha256').update(data).digest('hex') };
 }
 

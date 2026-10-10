@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { extractRunVideos } from '../src/enterprise-video-client.js';
 
 test('extracts the generated video card and uploaded MP4 file from a run snapshot', () => {
-  const snapshot = { nodes: [], messages: [{ message_id: '123456789012', content_block: [
+  const snapshot = { nodes: [], messages: [{ message_id: '123456789012', user_type: 2, content_block: [
     { block_type: 10084, block_id: 'video-block', content: { rich_media_layout_block: { media: [{ creation: {
       type: 2, id: 'creation-1', video: { status: 3, video_type: 'mp4', width: '1280', height: '720',
         duration: 5.05, download_url: 'https://v9-default.douyin.com/signed', vid: 'v1' },
@@ -21,7 +21,7 @@ test('extracts the generated video card and uploaded MP4 file from a run snapsho
 });
 
 test('does not treat unfinished cards or generic files as videos', () => {
-  const snapshot = { nodes: [], messages: [{ message_id: '123456789012', content_block: [
+  const snapshot = { nodes: [], messages: [{ message_id: '123456789012', user_type: 2, content_block: [
     { block_type: 10084, content: { rich_media_layout_block: { media: [{ creation: {
       type: 2, video: { status: 1, video_type: 'mp4', width: '1280', height: '720', duration: 5,
         download_url: 'https://v9-default.douyin.com/signed' },
@@ -42,5 +42,5 @@ test('falls back to Doubao short video links in assistant text only', () => {
   assert.deepEqual(videos.map(video => [video.kind, video.source, video.creationId]), [['link', link, 'nLUiTQI1ka']]);
   const structured = { block_type: 10020, block_id: 'file', content: { file_block: { type: 'mp4', name: 'a.mp4', url: 'https://p6-flow-sign.byteimg.com/x' } } };
   reply.content_block.push(structured);
-  assert.deepEqual(extractRunVideos({ nodes: [], messages: [reply] }).map(video => video.kind), ['file']);
+  assert.deepEqual(extractRunVideos({ nodes: [], messages: [reply] }).map(video => video.kind), ['file', 'link']);
 });

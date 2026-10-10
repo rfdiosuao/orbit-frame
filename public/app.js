@@ -1,4 +1,8 @@
+import { videoDurationRange, validateVideoDuration } from '/video-models.js';
 import { setupApiExamples } from '/api-examples.js';
+import { setupAgentPrompt } from '/agent-prompt.js';
+import { setupVideoFrames } from '/video-frames-ui.js';
+import { followsVideoTask, isCloudVideo, needsCloudExtraction } from '/video-task-state.js';
 import { initPointerFX, runSplash } from '/heang/index.js';
 
 const $ = id => document.getElementById(id);
@@ -22,12 +26,14 @@ const statusText = {
 let apiKey = '';
 let currentTask = null;
 let currentBlobUrl = null;
-let currentBlob = null;
 let pollTimer = null;
 let elapsedTimer = null;
 let requestBusy = false;
+let queryFailures = 0;
 let generationBusy = false;
+let framePicker = null;
 let history = [];
+let historyCursor = null, historyBusy = false, historyRevision = 0;
 let streamAbort = null;
 let streamUnsupported = false;
 let lastStatus = null;
@@ -63,11 +69,13 @@ function validVideo(video) { return video && /^[0-9a-f]{32,64}$/i.test(String(vi
 
 async function api(path, options = {}) {
   if (!getKey()) throw new Error('请先到连接设置输入本地服务密钥。');
-  const response = await fetch(path, { ...options, headers: { Authorization: `Bearer ${getKey()}`, ...options.headers } });
+  let response;
+  try { response = await fetch(path, { ...options, signal: options.signal || AbortSignal.timeout(path.includes('/generations') ? 180_000 : 15_000), headers: { Authorization: `Bearer ${getKey()}`, ...options.headers } }); }
+  catch (error) { throw new Error(error.name === 'TimeoutError' ? '网关响应超时，请继续查询原任务。' : '网关连接暂时中断，请稍后重试。'); }
   const data = await response.json().catch(() => null);
   if (!response.ok && response.status !== 202) {
     const message = response.status === 401 ? '密钥无效。请在连接设置中检查。' : data?.error?.message || `请求失败（${response.status}）`;
-    throw new Error(message);
+    throw Object.assign(new Error(message), { status: response.status, diagnostic: data?.error });
   }
   return data;
 }
@@ -80,17 +88,19 @@ function clearVideo() {
   $('videoPlayer').pause();
   $('videoPlayer').removeAttribute('src');
   $('videoPlayer').load();
-  if (currentBlobUrl) URL.revokeObjectURL(currentBlobUrl);
   currentBlobUrl = null;
-  currentBlob = null;
   $('downloadButton').disabled = true;
 }
 function setBadge(text) { $('previewBadge').textContent = text; }
 function taskInfo(job) {
   $('taskDetails').hidden = false;
   $('taskIdText').textContent = `任务 ID：${job.task_id || ''}`;
-  $('taskMessageText').textContent = job.message || '';
-  $('retryButton').hidden = !retryable.has(job.status);
+  $('taskMessageText').textContent = [job.message, job.error?.code ? `诊断：${job.error.code}` : '',
+    job.timings_ms?.submit_ms != null ? `提交耗时：${(job.timings_ms.submit_ms / 1000).toFixed(1)} 秒` : ''].filter(Boolean).join(' · ');
+  $('retryButton').hidden = !retryable.has(job.status) && !needsCloudExtraction(job);
+  if (job.status === 'unknown' && !job.run_id) $('retryButton').hidden = true;
+  $('finishTrackingButton').hidden = !(job.status === 'unknown' && !job.run_id);
+  $('retryButton').textContent = needsCloudExtraction(job) ? '重新提取云盘版本 ↗' : job.next_action === 'retry_extraction' ? '重新提取视频 ↗' : '继续查询原任务 ↗';
 }
 function startElapsed(job) {
   clearInterval(elapsedTimer);
@@ -112,6 +122,9 @@ async function watchTask(job) {
   stopStream();
   const controller = new AbortController();
   streamAbort = controller;
+  let watchdog;
+  const arm = () => { clearTimeout(watchdog); watchdog = setTimeout(() => controller.abort(), 45000); };
+  arm();
   try {
     const response = await fetch(`/v1/videos/tasks/${encodeURIComponent(job.task_id)}/events`, { headers: { Authorization: `Bearer ${getKey()}` }, signal: controller.signal });
     if (!response.ok || !response.body) { streamUnsupported = response.status !== 401; throw new Error('stream unavailable'); }
@@ -120,6 +133,7 @@ async function watchTask(job) {
     for (;;) {
       const { value, done } = await reader.read();
       if (done) break;
+      arm();
       buffer += value;
       let end;
       while ((end = buffer.indexOf('\n\n')) >= 0) {
@@ -129,9 +143,10 @@ async function watchTask(job) {
       }
     }
   } catch { /* Fall back to polling below. */ }
+  finally { clearTimeout(watchdog); }
   if (streamAbort !== controller) return;
   streamAbort = null;
-  if (['running', 'submitting'].includes(currentTask?.status) && currentTask.task_id === job.task_id) schedulePoll(currentTask);
+  if (followsVideoTask(currentTask) && currentTask.task_id === job.task_id) schedulePoll(currentTask);
 }
 function renderPhases(job) {
   const list = $('phaseSteps');
@@ -140,7 +155,7 @@ function renderPhases(job) {
   list.replaceChildren(...phases.map(([key, label], index) => {
     const item = document.createElement('li');
     item.textContent = label;
-    item.className = index < current ? 'done' : index === current ? 'current' : '';
+    item.className = key === job.phase ? 'current' : job.observed_phases?.includes(key) ? 'done' : '';
     if (index === current) item.setAttribute('aria-current', 'step');
     return item;
   }));
@@ -148,14 +163,14 @@ function renderPhases(job) {
 
 async function loadVideo(video) {
   if (!validVideo(video)) throw new Error('任务没有可用的视频文件。');
+  const source = `/v1/videos/files/${encodeURIComponent(video.id)}`;
+  if (currentBlobUrl === source) return;
   clearVideo();
-  const response = await fetch(`/v1/videos/files/${encodeURIComponent(video.id)}`, { headers: { Authorization: `Bearer ${getKey()}` } });
-  if (!response.ok) throw new Error(response.status === 401 ? '密钥无效。请重新连接。' : `视频文件读取失败（${response.status}）。`);
-  const blob = await response.blob();
-  if (!blob.size || !/^video\/mp4(?:;|$)/i.test(blob.type)) throw new Error('视频文件无效，请重新查询任务。');
-  currentBlob = blob;
-  currentBlobUrl = URL.createObjectURL(blob);
-  $('videoPlayer').src = currentBlobUrl;
+  // local-access has already established the HttpOnly media cookie. Native
+  // playback requests ranges instead of buffering the entire MP4 in memory.
+  currentBlobUrl = source;
+  $('videoPlayer').preload = 'metadata';
+  $('videoPlayer').src = source;
   showStage('video');
   $('downloadButton').disabled = false;
 }
@@ -168,7 +183,7 @@ async function showTask(job, { poll = true } = {}) {
   const draft = activeDraft();
   $('previewName').textContent = titleFor({ prompt: job.prompt || (draft?.taskId === job.task_id ? draft.prompt : ''), created_at: job.created_at || draft?.createdAt });
   const ownDraft = draft?.taskId === job.task_id ? draft : null;
-  $('previewDetail').textContent = [job.duration || ownDraft?.duration ? `${job.duration || ownDraft.duration} 秒` : '', job.ratio || ownDraft?.ratio || '', 'MP4'].filter(Boolean).join(' · ');
+  $('previewDetail').textContent = [job.duration || ownDraft?.duration ? `${job.duration || ownDraft.duration} 秒` : '', job.ratio || ownDraft?.ratio || '', 'MP4', isCloudVideo(job.videos?.[0]) ? '云盘上传版本' : ''].filter(Boolean).join(' · ');
   setBadge(headline);
   taskInfo(job);
   renderPhases(job);
@@ -179,15 +194,15 @@ async function showTask(job, { poll = true } = {}) {
   $('loadingDescription').textContent = description;
   if (status === 'completed' && Array.isArray(job.videos) && job.videos.some(validVideo)) {
     stopElapsed();
-    try { await loadVideo(job.videos.find(validVideo)); setNotice('作品已完成，可以预览与下载。'); if (activeDraft()?.taskId === job.task_id) removeActive(); }
+    try { await loadVideo(job.videos.find(validVideo)); $('downloadButton').disabled = !isCloudVideo(job.videos.find(validVideo)); setNotice(isCloudVideo(job.videos.find(validVideo)) ? '云盘上传版本已完成，可以预览与下载。' : '这是旧版提取的文件。请点“重新提取云盘版本”，再下载。'); if (activeDraft()?.taskId === job.task_id) removeActive(); }
     catch (error) { showStage('loading'); $('loadingTitle').textContent = '视频读取失败'; $('loadingDescription').textContent = error.message; $('retryButton').hidden = false; setNotice(error.message, true); }
   } else {
     clearVideo(); showStage('loading'); startElapsed(job);
     if (status === 'completed') { $('loadingTitle').textContent = '未找到有效视频'; $('loadingDescription').textContent = '任务标记为完成，但没有可用的 MP4 文件。'; $('retryButton').hidden = true; }
-    if (paused.has(status)) { stopElapsed(); setNotice(description, true); }
+    if (paused.has(status)) { if (!followsVideoTask(job)) stopElapsed(); $('loadingDescription').textContent = job.message || description; setNotice(job.message || description, true); }
     else setNotice('任务已接收。页面刷新后仍可继续查看同一个任务。');
     if (terminal.has(status) && activeDraft()?.taskId === job.task_id) removeActive();
-    if (poll && ['running', 'submitting'].includes(status)) { if (streamUnsupported) schedulePoll(job); else watchTask(job); }
+    if (poll && followsVideoTask(job)) { if (streamUnsupported) schedulePoll(job); else watchTask(job); }
   }
   generationBusy = false;
   $('generateButton').disabled = false;
@@ -197,11 +212,12 @@ async function queryTask(id, { manual = false } = {}) {
   if (requestBusy || !id) return;
   requestBusy = true;
   clearTimeout(pollTimer);
-  if (manual) { stopStream(); $('retryButton').disabled = true; setNotice('正在查询原任务，不会重新提交。'); }
+  if (manual) { queryFailures = 0; stopStream(); $('retryButton').disabled = true; setNotice('正在查询原任务，不会重新提交。'); }
   try {
     // Only a manual retry of a paused task asks the gateway to re-read Doubao.
-    const refresh = manual && retryable.has(currentTask?.task_id === id ? currentTask.status : '');
+    const refresh = manual && currentTask?.task_id === id && (retryable.has(currentTask.status) || needsCloudExtraction(currentTask));
     const job = await api(`/v1/videos/tasks/${encodeURIComponent(id)}${refresh ? '?refresh=1' : ''}`);
+    queryFailures = 0;
     await showTask(job, { poll: manual || !streamAbort });
   } catch (error) {
     clearTimeout(pollTimer);
@@ -211,6 +227,12 @@ async function queryTask(id, { manual = false } = {}) {
     $('loadingDescription').textContent = '任务仍可恢复。检查连接后重新查询。';
     $('previewLoading').classList.add('is-paused');
     showStage('loading'); stopElapsed(); setNotice(error.message, true);
+    queryFailures++;
+    if (currentTask?.task_id === id && followsVideoTask(currentTask) &&
+        ![400, 401, 403, 404].includes(error.status) && queryFailures <= 6) {
+      $('loadingDescription').textContent = '正在自动重连并查询原任务，不会重新提交生成。';
+      pollTimer = setTimeout(() => queryTask(id), Math.min(12000, 1000 * 2 ** queryFailures));
+    }
   } finally { requestBusy = false; $('retryButton').disabled = false; }
 }
 async function submitVideo(event) {
@@ -218,20 +240,25 @@ async function submitVideo(event) {
   if (generationBusy || requestBusy) return;
   const prompt = $('videoPrompt').value.trim();
   const duration = Number($('videoDuration').value);
+  const model = $('videoModel').value;
   const ratio = document.querySelector('input[name=ratio]:checked')?.value || '16:9';
   if (!prompt) { setNotice('请先写下想生成的画面。', true); $('videoPrompt').focus(); return; }
-  if (!Number.isInteger(duration) || duration < 1 || duration > 15) { setNotice('视频时长请输入 1 到 15 秒。', true); $('videoDuration').focus(); return; }
+  try { validateVideoDuration(model, duration); } catch { const { min, max } = videoDurationRange(model); setNotice(`视频时长请输入 ${min} 到 ${max} 秒。`, true); $('videoDuration').focus(); return; }
   if (!getKey()) await applyKey();
   if (generationBusy || requestBusy) return;
   if (!getKey()) { setNotice('自动连接失败，请在连接设置中重新连接。', true); setView('settings'); $('apiKey').focus(); return; }
   let draft = activeDraft();
-  if (draft && !draft.taskId && (draft.prompt !== prompt || draft.duration !== duration || draft.ratio !== ratio)) {
+  if (draft?.taskId) { setNotice('已有任务需要先确认状态。正在查询原任务，不会重新提交。', true); await queryTask(draft.taskId, { manual: true }); return; }
+  let frames;
+  try { frames = framePicker.request(); }
+  catch (error) { setNotice(error.message, true); return; }
+  const draftFrames = draft ? { mode: draft.mode || 'text_to_video', ...(draft.first_frame ? { first_frame: draft.first_frame } : {}), ...(draft.last_frame ? { last_frame: draft.last_frame } : {}) } : null;
+  if (draft && !draft.taskId && (draft.prompt !== prompt || (draft.model || 'Seedance 2.0 Fast') !== model || draft.duration !== duration || draft.ratio !== ratio || JSON.stringify(draftFrames) !== JSON.stringify(frames))) {
     setNotice('上一次提交结果未确认。请保持原提示词与设置重试同一次请求。', true);
     return;
   }
-  if (draft?.taskId) { setNotice('已有任务需要先确认状态。正在查询原任务，不会重新提交。', true); await queryTask(draft.taskId, { manual: true }); return; }
-  if (!draft || draft.taskId || draft.prompt !== prompt || draft.duration !== duration || draft.ratio !== ratio) {
-    draft = { key: crypto.randomUUID(), prompt, duration, ratio, createdAt: new Date().toISOString(), taskId: null };
+  if (!draft || draft.taskId || draft.prompt !== prompt || (draft.model || 'Seedance 2.0 Fast') !== model || draft.duration !== duration || draft.ratio !== ratio) {
+    draft = { key: crypto.randomUUID(), prompt, model, duration, ratio, ...frames, frameAssets: framePicker.assets(), createdAt: new Date().toISOString(), taskId: null };
     saveActive(draft);
   }
   generationBusy = true; $('generateButton').disabled = true; $('generateButton').textContent = '正在提交…';
@@ -239,12 +266,22 @@ async function submitVideo(event) {
   setNotice('正在提交；如连接中断，重试会沿用同一个请求。');
   clearVideo(); showStage('loading'); setBadge('正在提交'); $('loadingTitle').textContent = '正在提交'; $('loadingDescription').textContent = '等待服务确认任务。'; startElapsed({ created_at: draft.createdAt });
   try {
-    const job = await api('/v1/videos/generations', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ provider: 'doubao-desktop', model: 'Seedance 2.0 Fast', duration, ratio, prompt, async: true, idempotency_key: draft.key }) });
+    const job = await api('/v1/videos/generations', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ provider: 'doubao-desktop', model, duration, ratio, prompt, ...frames, async: true, idempotency_key: draft.key }) });
     if (!job?.task_id) throw new Error('服务没有返回任务 ID。请使用相同设置重试。');
     draft.taskId = job.task_id; saveActive(draft);
     await showTask({ ...job, prompt, duration, ratio, created_at: draft.createdAt });
     loadHistory();
-  } catch (error) { generationBusy = false; $('generateButton').disabled = false; $('generateButton').innerHTML = '重试同一次提交 <span aria-hidden="true">↗</span>'; $('loadingTitle').textContent = '提交结果未确认'; $('loadingDescription').textContent = '可用同一提示词和设置重试；不会重新创建任务。'; $('previewLoading').classList.add('is-paused'); stopElapsed(); setNotice(error.message, true); }
+  } catch (error) {
+    generationBusy = false; $('generateButton').disabled = false;
+    const notSubmitted = error.diagnostic?.submitted === false;
+    if (notSubmitted) removeActive();
+    setBadge(notSubmitted ? '尚未提交' : '需要确认');
+    $('generateButton').innerHTML = notSubmitted ? '检查后生成视频 <span aria-hidden="true">↗</span>' : '重试同一次提交 <span aria-hidden="true">↗</span>';
+    $('loadingTitle').textContent = notSubmitted ? '尚未提交到豆包' : '提交结果未确认';
+    $('loadingDescription').textContent = notSubmitted ? error.message : '可用同一提示词和设置重试；不会重新创建任务。';
+    $('previewLoading').classList.add('is-paused'); stopElapsed(); setNotice(error.message, true);
+    void serviceStatus();
+  }
 }
 function makeRecent(item) {
   const btn = document.createElement('button'); btn.type = 'button'; btn.className = 'recent-item';
@@ -267,14 +304,42 @@ function renderHistory() {
   history.slice(0, 3).forEach(item => recent.append(makeRecent(item)));
   history.forEach(item => { const card = document.createElement('button'); card.type = 'button'; card.className = 'card library-item lift'; const thumb = document.createElement('div'); thumb.className = 'library-thumb'; const logo = document.createElement('img'); logo.src = '/orbit-frame.svg'; logo.alt = ''; thumb.append(logo); const info = document.createElement('div'); info.className = 'library-info'; const title = document.createElement('strong'); title.textContent = titleFor(item); const meta = document.createElement('p'); meta.textContent = [toDate(item.created_at), statusLabel(item.status), item.ratio || ''].filter(Boolean).join(' · '); info.append(title, meta); card.append(thumb, info); card.onclick = () => openHistory(item); grid.append(card); });
 }
-async function loadHistory() {
+async function loadHistory(append = false) {
+  if (append && (historyBusy || !historyCursor)) return;
   if (!getKey()) { $('libraryNotice').textContent = '输入本地服务密钥后可读取作品库。'; renderHistory(); return; }
-  try { const data = await api('/v1/videos/tasks'); history = Array.isArray(data?.tasks) ? data.tasks : []; $('libraryNotice').textContent = ''; renderHistory(); }
+  const revision = ++historyRevision; historyBusy = true; $('loadMoreHistory').disabled = true;
+  try {
+    const data = await api(`/v1/videos/tasks?limit=40${append ? `&before=${encodeURIComponent(historyCursor)}` : ''}`);
+    if (revision !== historyRevision) return;
+    const incoming = Array.isArray(data?.tasks) ? data.tasks : [];
+    history = append ? [...new Map([...history, ...incoming].map(item => [item.task_id, item])).values()] : incoming;
+    historyCursor = data.next_cursor || null; $('loadMoreHistory').hidden = !historyCursor;
+    $('libraryNotice').textContent = ''; renderHistory();
+  }
   catch (error) { $('libraryNotice').textContent = error.message; }
+  finally { if (revision === historyRevision) { historyBusy = false; $('loadMoreHistory').disabled = false; } }
 }
-async function serviceStatus() {
-  try { const response = await fetch('/health', { cache: 'no-store' }); if (!response.ok) throw new Error('offline'); $('serviceStatus').classList.add('online'); $('serviceStatus').lastChild.textContent = ' 本地服务在线'; }
-  catch { $('serviceStatus').classList.remove('online'); $('serviceStatus').lastChild.textContent = ' 本地服务未连接'; }
+let readinessRequest = null;
+async function serviceStatus(force = false) {
+  if (readinessRequest) { if (!force) return readinessRequest; await readinessRequest; }
+  readinessRequest = (async () => {
+    let ready = false, message = '本地网关未连接，请启动网关。', label = ' 网关未连接';
+    try {
+      const response = await fetch('/health', { cache: 'no-store', signal: AbortSignal.timeout(5000) });
+      if (!response.ok) throw new Error('offline');
+      label = ' 网关在线 · 检查客户端'; message = '网关已启动，正在检查豆包客户端。';
+      if (getKey()) {
+        const state = await api(`/v1/videos/readiness${force ? '?refresh=1' : ''}`);
+        ready = state.ready; message = state.message;
+        label = ready ? ' 豆包客户端已连接' : state.code === 'login_required' ? ' 豆包需要登录' : ' 豆包暂不可用';
+      }
+    } catch (error) { if (getKey() && label.includes('在线')) { message = '客户端检查超时或失败，请重新检查连接。'; label = ' 客户端状态未确认'; } }
+    $('serviceStatus').classList.toggle('online', ready);
+    $('serviceStatus').lastChild.textContent = label; $('serviceStatus').title = message;
+    $('videoConnectionBanner').hidden = ready;
+    $('videoConnectionNotice').textContent = message;
+  })();
+  try { await readinessRequest; } finally { readinessRequest = null; }
 }
 async function applyKey() {
   if (localConnection) return localConnection;
@@ -288,6 +353,9 @@ async function applyKey() {
       const data = await response.json();
       if (!data.api_key) throw new Error('网关没有返回连接配置，请重启网关。');
       apiKey = data.api_key;
+      void serviceStatus(true);
+      void framePicker?.restorePreviews();
+      setupAgentPrompt({ projectDir: data.project_dir, mediaDir: data.media_dir });
       await api('/v1/videos/tasks');
       $('apiKey').value = apiKey;
       $('copyKeyButton').disabled = false;
@@ -323,6 +391,23 @@ async function generateImage(event) {
 }
 function setup() {
   try { localStorage.removeItem(SAVED_KEY); } catch {}
+  framePicker = setupVideoFrames({
+    notice: setNotice,
+    locked: () => generationBusy || !!activeDraft(),
+    changed: () => { $('generateButton').disabled = generationBusy || !!framePicker?.isBusy(); },
+    upload: async file => {
+      if (!getKey()) await applyKey();
+      if (!getKey()) throw new Error('自动连接失败，请在连接设置中重新连接。');
+      if (generationBusy || activeDraft()) throw new Error('已有任务需要先确认状态。');
+      return api('/v1/videos/frames', { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: file });
+    },
+    preview: async url => {
+      const response = await fetch(url, { headers: { Authorization: `Bearer ${getKey()}` } });
+      if (!response.ok) throw new Error('图片预览暂时不可用');
+      return response.blob();
+    },
+  });
+  framePicker.restore(activeDraft());
   document.querySelectorAll('[data-view]').forEach(button => button.addEventListener('click', () => setView(button.dataset.view)));
   $('seeAllButton').onclick = () => setView('library'); $('createForm').addEventListener('submit', submitVideo);
   $('imageForm').addEventListener('submit', generateImage);
@@ -333,20 +418,43 @@ function setup() {
   }
   $('videoPrompt').addEventListener('input', () => { $('promptCount').textContent = `${$('videoPrompt').value.length} 字`; });
   document.querySelectorAll('.suggestion').forEach(button => button.onclick = () => { $('videoPrompt').value = button.dataset.prompt; $('videoPrompt').dispatchEvent(new Event('input')); $('videoPrompt').focus(); });
-  const adjust = delta => { $('videoDuration').value = String(Math.max(1, Math.min(15, Number($('videoDuration').value || 5) + delta))); };
+  const updateModel = () => { const { min, max } = videoDurationRange($('videoModel').value); $('videoDuration').min = min; $('videoDuration').max = max; $('videoDuration').value = String(Math.max(min, Math.min(max, Number($('videoDuration').value || 5)))); $('videoModelLabel').textContent = $('videoModel').value; };
+  $('videoModel').onchange = updateModel;
+  const adjust = delta => { const { min, max } = videoDurationRange($('videoModel').value); $('videoDuration').value = String(Math.max(min, Math.min(max, Number($('videoDuration').value || 5) + delta))); };
   $('durationMinus').onclick = () => adjust(-1); $('durationPlus').onclick = () => adjust(1);
   $('saveKeyButton').onclick = applyKey;
+  $('checkVideoConnection').onclick = async () => {
+    $('checkVideoConnection').disabled = true;
+    try { await serviceStatus(true); } finally { $('checkVideoConnection').disabled = false; }
+  };
   $('copyKeyButton').onclick = async () => {
     try { if (!getKey()) throw new Error('请先重新连接。'); await navigator.clipboard.writeText(getKey()); $('copyKeyNotice').textContent = 'API Key 已复制，可用于调用网关 API。'; }
     catch { $('copyKeyNotice').textContent = '复制失败，请重新连接后重试。'; }
   };
   $('retryButton').onclick = () => queryTask(currentTask?.task_id || activeDraft()?.taskId, { manual: true });
-  $('downloadButton').onclick = () => { if (!currentBlobUrl || !currentBlob) return; const a = document.createElement('a'); a.href = currentBlobUrl; a.download = `orbit-frame-${currentTask?.task_id?.slice(0, 8) || 'video'}.mp4`; document.body.append(a); a.click(); a.remove(); };
-  const draft = activeDraft(); if (draft?.prompt) { $('videoPrompt').value = draft.prompt; $('videoPrompt').dispatchEvent(new Event('input')); $('videoDuration').value = draft.duration || 5; const ratio = document.querySelector(`input[name=ratio][value="${CSS.escape(draft.ratio || '16:9')}"]`); if (ratio) ratio.checked = true; }
+  $('finishTrackingButton').onclick = () => {
+    if (!confirm('请先在豆包客户端核对这次请求。结束本页跟踪不会取消豆包生成，也不会删除原任务；随后再次生成可能产生另一条视频。确认已核对并结束跟踪？')) return;
+    if (activeDraft()?.taskId === currentTask?.task_id) removeActive();
+    stopStream(); clearTimeout(pollTimer); stopElapsed(); generationBusy = false;
+    $('generateButton').disabled = false; $('generateButton').innerHTML = '生成视频 <span aria-hidden="true">↗</span>';
+    $('finishTrackingButton').hidden = true; setNotice('已结束本页跟踪，原任务仍保留在作品库。');
+  };
+  $('downloadButton').onclick = () => { if (!currentBlobUrl) return; const a = document.createElement('a'); a.href = currentBlobUrl; a.download = `orbit-frame-${currentTask?.task_id?.slice(0, 8) || 'video'}.mp4`; document.body.append(a); a.click(); a.remove(); };
+  $('loadMoreHistory').onclick = () => loadHistory(true);
+  $('videoPlayer').addEventListener('error', () => {
+    if (!currentBlobUrl) return;
+    showStage('loading'); $('downloadButton').disabled = true;
+    $('loadingTitle').textContent = '视频暂时无法播放';
+    $('loadingDescription').textContent = '请重新连接本机网关，然后继续查询原任务。';
+    $('retryButton').hidden = false; setNotice('视频文件加载失败，原任务和作品仍保留。', true);
+    currentBlobUrl = null;
+  });
+  const draft = activeDraft(); if (draft?.prompt) { $('videoPrompt').value = draft.prompt; $('videoPrompt').dispatchEvent(new Event('input')); $('videoModel').value = draft.model || 'Seedance 2.0 Fast'; $('videoDuration').value = draft.duration || 5; const ratio = document.querySelector(`input[name=ratio][value="${CSS.escape(draft.ratio || '16:9')}"]`); if (ratio) ratio.checked = true; }
+  updateModel();
   if (draft?.taskId && apiKey) queryTask(draft.taskId, { manual: true });
   else if (draft?.taskId) { setBadge('等待连接'); $('previewName').textContent = '有一个待恢复任务'; setNotice('请在连接设置中输入密钥，恢复同一个任务。'); }
   else if (draft) setNotice('有一次提交结果未确认。保持相同设置再次点击生成会沿用原请求。');
-  applyKey(); serviceStatus(); setInterval(serviceStatus, 30000);
+  applyKey(); serviceStatus(); setInterval(() => serviceStatus(), 15000);
   setupApiExamples();
   initPointerFX(); runSplash({ minMs: 650 });
 }
