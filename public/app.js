@@ -382,8 +382,29 @@ async function generateImage(event) {
   $('imageNotice').textContent = '正在生成图像…';
   $('imageResults').replaceChildren();
   try {
-    const data = await api('/v1/images/generations', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: $('imageModel').value, prompt, ratio: $('imageRatio').value, style: '默认', stream: false }) });
-    const urls = Array.isArray(data?.data) ? data.data.map(item => item?.url).filter(url => typeof url === 'string') : [];
+    const model = $('imageModel').value, ratio = $('imageRatio').value;
+    let urls;
+    if (model === 'gpt-image-2.5') {
+      const storageKey = 'orbit_frame_image_request';
+      const previous = readJSON(storageKey);
+      const reuse = previous?.prompt === prompt && previous?.model === model && previous?.ratio === ratio;
+      const request = reuse ? previous : { id: crypto.randomUUID(), prompt, model, ratio };
+      if (!reuse) localStorage.setItem(storageKey, JSON.stringify(request));
+      let job = await api('/v1/images/jobs', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider: 'openai-compatible', prompt, model, ratio, idempotency_key: request.id }),
+      });
+      while (job.status === 'running') {
+        $('imageNotice').textContent = 'gpt-image-2.5 正在生成图像…';
+        job = await api(`/v1/images/jobs/${job.id}?wait_seconds=25`, { signal: AbortSignal.timeout(40_000) });
+      }
+      if (['completed', 'failed', 'cancelled'].includes(job.status)) localStorage.removeItem(storageKey);
+      if (job.status !== 'completed') throw new Error(job.message || '生成结果暂未确认，再次点击会查询原任务。');
+      urls = (job.images || []).map(image => image.preview_url).filter(Boolean);
+    } else {
+      const data = await api('/v1/images/generations', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model, prompt, ratio, style: '默认', stream: false }) });
+      urls = Array.isArray(data?.data) ? data.data.map(item => item?.url).filter(url => typeof url === 'string') : [];
+    }
     for (const url of urls) { const image = document.createElement('img'); image.src = url; image.alt = prompt.slice(0, 100); image.loading = 'lazy'; $('imageResults').append(image); }
     $('imageNotice').textContent = urls.length ? `已生成 ${urls.length} 张图像。` : '服务没有返回图像，请稍后重试。';
   } catch (error) { $('imageNotice').textContent = error.message; }
