@@ -130,7 +130,7 @@ export function createVideoTaskStepper({ inspect, confirm, extraction, save, can
       job.phase = 'awaiting_confirmation';
       let result;
       try {
-        result = job.autoConfirm && !job.deliveryRunId ? await confirm(job.conversationId, job.generationRunId || job.runId, job.options,
+        result = job.autoConfirm && !job.deliveryRunId && state.textConfirmation?.eligible !== false ? await confirm(job.conversationId, job.generationRunId || job.runId, job.options,
           job.confirmationAttemptedIds, async id => { job.confirmationAttemptedIds.push(id); await save(job); },
           async receipt => { if (receipt.conversationId !== job.conversationId || !/^\d{12,24}$/.test(String(receipt.runId))) throw Error('Invalid confirmation receipt'); job.generationRunId = String(receipt.runId); await save(job); }) : { confirmed: false };
       } catch (error) {

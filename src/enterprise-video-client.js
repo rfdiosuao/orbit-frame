@@ -344,7 +344,7 @@ export async function confirmEnterpriseVideoAsk(conversationId, runId, options =
     const eligible = asks.filter(ask => isEligibleVideoConfirmationAsk(ask, answeredIds));
     if (!asks.length) {
       const textAsk = textVideoConfirmation(snapshot, options, messageBlocks);
-      if (textAsk && !answeredIds.some(id => id.startsWith('text:'))) {
+      if (textAsk?.eligible && !answeredIds.some(id => id.startsWith('text:'))) {
         const latest = await readTurn(client, conversationId, { receipt: {} });
         if (latest.result.runId !== runId) {
           if (isManualVideoConfirmation(latest, runId, messageBlocks)) {
