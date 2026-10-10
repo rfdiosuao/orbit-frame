@@ -425,7 +425,9 @@ export function createApp() {
     next();
   });
 
-  app.use(express.static(path.join(config.root, "public")));
+  app.use(express.static(path.join(config.root, "public"), { setHeaders(res, file) {
+    if (/\.(?:html|js)$/.test(file)) res.setHeader('Cache-Control', 'no-store');
+  } }));
 
   // Bootstrap the local page only; reject external origins and DNS rebinding.
   app.post('/api/local-access', (req, res) => {
@@ -658,6 +660,10 @@ export function createApp() {
     res.setTimeout?.(300_000);
     try {
       const body = req.body || {};
+      if (/^gpt-image-/i.test(String(body.model || ''))) {
+        return res.status(400).json({ error: { type: 'image_client_outdated', submitted: false,
+          message: '当前页面的生图脚本已过期，请刷新页面后使用 GPT 生图；本次未提交生成。' } });
+      }
       if (!body.prompt) {
         return res.status(400).json({
           error: { message: "prompt 不能为空", type: "invalid_request" },

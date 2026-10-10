@@ -67,14 +67,19 @@ function activeDraft() { return readJSON(ACTIVE_KEY); }
 function linkedTask() { const id = new URLSearchParams(location.search).get('task') || ''; return /^(?:[0-9a-f-]{36}|[0-9a-f]{64})$/.test(id) ? id : ''; }
 function validVideo(video) { return video && /^[0-9a-f]{32,64}$/i.test(String(video.id || '')); }
 
-async function api(path, options = {}) {
+async function api(path, options = {}, reconnect = true) {
   if (!getKey()) throw new Error('请先到连接设置输入本地服务密钥。');
   let response;
   try { response = await fetch(path, { ...options, signal: options.signal || AbortSignal.timeout(path.includes('/generations') ? 180_000 : 15_000), headers: { Authorization: `Bearer ${getKey()}`, ...options.headers } }); }
   catch (error) { throw new Error(error.name === 'TimeoutError' ? '网关响应超时，请继续查询原任务。' : '网关连接暂时中断，请稍后重试。'); }
   const data = await response.json().catch(() => null);
   if (!response.ok && response.status !== 202) {
-    const message = response.status === 401 ? '密钥无效。请在连接设置中检查。' : data?.error?.message || `请求失败（${response.status}）`;
+    const invalidLocalKey = response.status === 401 && data?.error?.type === 'auth_error';
+    // A gateway auth rejection happens before task submission. Reconnect once;
+    // upstream login failures must keep their own diagnostic and never replay.
+    if (invalidLocalKey && reconnect && !localConnection && await applyKey()) return api(path, options, false);
+    const message = invalidLocalKey ? '网关连接已失效，请点击连接设置中的重新连接。' : data?.error?.message ||
+      (response.status === 401 ? '网站登录已失效，请刷新页面重新登录。' : `请求失败（${response.status}）`);
     throw Object.assign(new Error(message), { status: response.status, diagnostic: data?.error });
   }
   return data;
