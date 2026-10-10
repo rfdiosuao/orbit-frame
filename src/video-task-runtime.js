@@ -84,7 +84,7 @@ export function createVideoTaskStepper({ inspect, confirm, extraction, save, can
     job.confirmedIds ||= []; job.confirmationAttemptedIds ||= [];
     const started = now();
     let state;
-    try { state = await inspect(job.conversationId, job.runId, { confirmedIds: job.confirmedIds, deliveryRunId: job.deliveryRunId || null }); }
+    try { state = await inspect(job.conversationId, job.generationRunId || job.runId, { confirmationOptions: job.options, confirmedIds: job.confirmedIds, deliveryRunId: job.deliveryRunId || null }); }
     catch (error) {
       job.readFailures = (job.readFailures || 0) + 1;
       job.error = videoDiagnostic(classifyVideoError(error), { retryable: true, submitted: true });
@@ -105,7 +105,7 @@ export function createVideoTaskStepper({ inspect, confirm, extraction, save, can
       if (cancel && !['completed', 'failed', 'cancelled'].includes(state.status)) {
         job.cancellation = { state: 'requested', accepted: false, confirmed: false, requested_at: new Date(now()).toISOString() };
         await save(job);
-        try { Object.assign(job.cancellation, await cancel(job.conversationId, job.deliveryRunId || job.runId)); }
+        try { Object.assign(job.cancellation, await cancel(job.conversationId, job.deliveryRunId || job.generationRunId || job.runId)); }
         catch { job.cancellation.state = 'unknown'; }
         await save(job);
       }
@@ -114,6 +114,7 @@ export function createVideoTaskStepper({ inspect, confirm, extraction, save, can
     job.pending = (state.pending || []).map(item => ({ kind: item.kind, messageId: item.messageId,
       blockId: item.blockId, clarifyId: item.clarifyId, questionIds: item.questions?.map(q => q.question_id) || [] }))
       .filter(item => !item.clarifyId || !job.confirmedIds.includes(item.clarifyId));
+    if (state.textConfirmation) { state.status = 'waiting_input'; job.pending.push({kind:'text_confirmation', clarifyId:state.textConfirmation.id, messageId:state.textConfirmation.messageId}); }
     if (state.status === 'completed') {
       job.status = 'running'; job.phase = 'extracting';
       await save(job);
@@ -129,14 +130,16 @@ export function createVideoTaskStepper({ inspect, confirm, extraction, save, can
       job.phase = 'awaiting_confirmation';
       let result;
       try {
-        result = job.autoConfirm && !job.deliveryRunId ? await confirm(job.conversationId, job.runId, job.options,
-          job.confirmationAttemptedIds, async id => { job.confirmationAttemptedIds.push(id); await save(job); }) : { confirmed: false };
+        result = job.autoConfirm && !job.deliveryRunId ? await confirm(job.conversationId, job.generationRunId || job.runId, job.options,
+          job.confirmationAttemptedIds, async id => { job.confirmationAttemptedIds.push(id); await save(job); },
+          async receipt => { if (receipt.conversationId !== job.conversationId || !/^\d{12,24}$/.test(String(receipt.runId))) throw Error('Invalid confirmation receipt'); job.generationRunId = String(receipt.runId); await save(job); }) : { confirmed: false };
       } catch (error) {
         // An attempted mutation is never automatically repeated after a disconnect.
         job.status = 'unknown'; job.error = videoDiagnostic('confirmation_unknown', { submitted: true, retryable: false });
         job.message = job.error.message; return save(job);
       }
       if (result.confirmed) {
+        if (result.runId) job.generationRunId = result.runId;
         job.confirmedIds.push(result.clarifyId);
         job.pending = job.pending.filter(item => !job.confirmedIds.includes(item.clarifyId));
         job.status = job.pending.length ? 'waiting_input' : 'running';

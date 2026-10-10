@@ -37,7 +37,7 @@ const diagnosticFor = job => job.error || (job.status === 'unknown' && !job.runI
   ? videoDiagnostic('submit_unknown', { submitted: 'unknown', retryable: false }) : null);
 const publicJob = job => ({
   id: job.id, provider: 'doubao-desktop', status: job.status, phase: phaseOf(job),
-  conversation_id: job.conversationId || null, run_id: job.runId || null,
+  conversation_id: job.conversationId || null, run_id: job.runId || null, generation_run_id: job.generationRunId || null,
   requested_model: job.requestedModel, model_verification: 'requested_only',
   cancellation:job.cancellation || null,
   reference_failure:job.reference_failure || null,
@@ -267,7 +267,7 @@ export async function cancelEnterpriseVideoJob(id,{cancel=cancelEnterpriseRun}={
     if(terminalStatuses.includes(job.status)) {job.cancellation={state:job.status==='completed'?'already_completed':job.status,accepted:false,confirmed:true};await save(job);return publicJob(job);}
     job.cancellation={state:'requested',accepted:false,confirmed:false,requested_at:new Date().toISOString()};await save(job);
     if(!job.conversationId || !job.runId) {job.cancellation.state='unknown';await save(job);return publicJob(job);}
-    let result;try {result=await cancel(job.conversationId,job.deliveryRunId || job.runId);}catch {result={state:'unknown',accepted:false,confirmed:false};}
+    let result;try {result=await cancel(job.conversationId,job.deliveryRunId || job.generationRunId || job.runId);}catch {result={state:'unknown',accepted:false,confirmed:false};}
     job.cancellation={...job.cancellation,...result};
     if(result.confirmed && result.state==='cancelled') {job.status='cancelled';job.phase=null;job.pending=[];}
     await save(job);return publicJob(job);
@@ -281,7 +281,7 @@ const extraction = createExtractionQueue(async (id, state) => {
     const started = Date.now();
     job.delivery = selectCloudVideos(state.videos).delivery;
     try {
-      const result = await recoverEnterpriseVideo(job.conversationId, job.runId, { state,
+      const result = await recoverEnterpriseVideo(job.conversationId, job.generationRunId || job.runId, { state,
         expect: job.options?.duration ? { duration: job.options.duration, ratio: job.options.ratio } : null,
         onPhase: async phase => { job.phase = phase; await save(job); } });
       if (await continueCloudDeliveryOnce(job, state, result, { request: requestEnterpriseCloudDelivery, save })) {

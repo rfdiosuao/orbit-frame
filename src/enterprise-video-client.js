@@ -19,6 +19,7 @@ import { boundedCdp } from './video-errors.js';
 import { readLiveVideoTurn, acknowledgeLiveConfirmations } from './video-live-turn.js';
 import { extractCloudVideos, selectCloudVideos } from './video-delivery.js';
 import { videoDiagnostic } from './video-errors.js';
+import { textVideoConfirmation, isManualVideoConfirmation } from './video-text-confirmation.js';
 import { validateVideoDuration } from './video-models.js';
 import { extractReferenceFailure } from './reference-failure.js';
 
@@ -279,7 +280,7 @@ async function downloadMp4(rawUrl, file) {
   throw new Error('Video exceeded redirect limit');
 }
 
-export async function inspectEnterpriseRun(conversationId, runId, { confirmedIds = [], deliveryRunId = null, fresh = false } = {}) {
+export async function inspectEnterpriseRun(conversationId, runId, { confirmedIds = [], deliveryRunId = null, fresh = false, confirmationOptions = {} } = {}) {
   validId(conversationId, 'conversation_id');
   validId(runId, 'run_id');
   if (deliveryRunId) validId(deliveryRunId, 'delivery_run_id');
@@ -308,7 +309,8 @@ export async function inspectEnterpriseRun(conversationId, runId, { confirmedIds
     }
     return { status: snapshot.result.status, pending: snapshot.result.pending || [],
       videos: extractRunVideos(mediaSnapshot), reference_failure: extractReferenceFailure(mediaSnapshot),
-      message: snapshot.result.progress || snapshot.result.reply?.text || '' };
+      message: snapshot.result.progress || snapshot.result.reply?.text || '',
+      textConfirmation: !deliveryRunId ? textVideoConfirmation(snapshot, confirmationOptions, messageBlocks) : null };
   }));
 }
 
@@ -331,7 +333,7 @@ export function isEligibleVideoConfirmationAsk(ask, answeredIds = []) {
     question.type === 1 && videoConfirmationOption(question) !== null;
 }
 
-export async function confirmEnterpriseVideoAsk(conversationId, runId, options = {}, answeredIds = [], beforeSubmit = async () => {}) {
+export async function confirmEnterpriseVideoAsk(conversationId, runId, options = {}, answeredIds = [], beforeSubmit = async () => {}, onReceipt = async () => {}) {
   validId(conversationId, 'conversation_id');
   validId(runId, 'run_id');
   return withDoubaoClient(async client => {
@@ -340,6 +342,32 @@ export async function confirmEnterpriseVideoAsk(conversationId, runId, options =
     const asks = snapshot.messages.flatMap(messageBlocks)
       .map(block => block.content?.interaction_ask_block).filter(Boolean);
     const eligible = asks.filter(ask => isEligibleVideoConfirmationAsk(ask, answeredIds));
+    if (!asks.length) {
+      const textAsk = textVideoConfirmation(snapshot, options, messageBlocks);
+      if (textAsk && !answeredIds.some(id => id.startsWith('text:'))) {
+        const latest = await readTurn(client, conversationId, { receipt: {} });
+        if (latest.result.runId !== runId) {
+          if (isManualVideoConfirmation(latest, runId, messageBlocks)) {
+            await onReceipt({ conversationId, runId: latest.result.runId });
+            return { confirmed: true, clarifyId: textAsk.id, runId: latest.result.runId, source: 'manual_text' };
+          }
+          return { confirmed: false, reason: 'conversation_advanced' };
+        }
+        const resolved = await resolveTaskContext(client, conversationId, { runtime: 'cloud' });
+        await beforeSubmit(textAsk.id);
+        let checkpoint = Promise.resolve();
+        const recordAck = next => { if (next.runId) { checkpoint = checkpoint.then(async () => { await onReceipt(next); receipts.save(next); }); checkpoint.catch(() => {}); } };
+        let receipt;
+        try { receipt = await sendChatCompletion(client, {
+          conversationId, message: `确认，按刚才摘要及本次已授权的 ${options.model}、${options.duration}秒、${options.ratio} 参数，仅生成这1条视频，沿用原提示词和原图。生成后将同一原始MP4上传豆包云盘并交付附件，不要重复生成。`,
+          model: modelProtocol('auto'), waitForReply: false, timeoutMs: 30_000, ...resolved,
+          onReceipt: recordAck,
+        }); } finally { await checkpoint; }
+        if (!receipt.runId || receipt.conversationId !== conversationId) throw new Error('Text confirmation ACK missing');
+        await onReceipt(receipt); receipts.save(receipt);
+        return { confirmed: true, clarifyId: textAsk.id, runId: receipt.runId };
+      }
+    }
     if (eligible.length !== 1) return { confirmed: false, reason: asks.length ? 'requires_manual_input' : 'no_confirmation' };
     const ask = eligible[0];
     const q = ask.questions[0];
